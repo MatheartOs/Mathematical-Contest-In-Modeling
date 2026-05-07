@@ -38,6 +38,23 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\python.exe science_complex_test.py
 ```
 
+## 远程仓库
+
+GitHub 地址：
+
+```text
+git@github.com:MatheartOs/Mathematical-Contest-In-Modeling.git
+```
+
+提交或同步前建议运行：
+
+```powershell
+.\.venv\Scripts\python.exe math_test.py
+.\.venv\Scripts\python.exe verify_science_stack.py
+.\.venv\Scripts\python.exe science_complex_test.py
+.\.venv\Scripts\python.exe -m pip check
+```
+
 ## 已包含的第三方科学计算包
 
 | 包名 | 用途 |
