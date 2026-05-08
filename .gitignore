@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 
 
-CLAUDE.md
+Claude.md
 claude
 
 .ipynb_checkpoints/
@@ -17,4 +17,4 @@ claude
 /data1/
 outputs/*
 !outputs/.gitkeep
-Prompt
+Prompt.md
