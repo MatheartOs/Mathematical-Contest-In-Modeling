@@ -4,6 +4,7 @@ __pycache__/
 
 
 CLAUDE.md
+claude
 
 .ipynb_checkpoints/
 .pytest_cache/
@@ -13,6 +14,7 @@ CLAUDE.md
 .env
 .env.*
 
-/data/
+/data1/
 outputs/*
 !outputs/.gitkeep
+Prompt
