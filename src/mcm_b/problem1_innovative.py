@@ -1,11 +1,5 @@
 """Innovative Problem 1 model: heterogeneous graph propagation + c-TF-IDF.
 
-The implementation follows the modeling idea in ``docs/解析.md`` while keeping
-the dependency footprint suitable for the current contest workspace.  Instead
-of requiring BERT/GCN runtime packages, it builds a document-word heterogeneous
-representation, estimates positive PMI word-word edges, performs two-hop graph
-propagation on document TF-IDF vectors, and fuses structure/business features
-before clustering.
 """
 
 from __future__ import annotations
@@ -59,6 +53,41 @@ NOISE_TERMS = (
     "关键词",
 )
 
+GENERIC_TOPIC_TERMS = {
+    "地区",
+    "其他",
+    "单位",
+    "数据",
+    "服务",
+    "研究",
+    "工作",
+    "管理",
+    "技术",
+    "中心",
+    "包括",
+    "数字",
+    "年份",
+    "合计",
+    "相关",
+    "主要",
+    "模型",
+}
+
+TOPIC_ANCHORS = {
+    "文旅活动评价类": ("文化", "文博", "博物馆", "文物", "遗产", "旅游", "体育", "活动", "讲座", "论坛", "展览", "冰雪", "滑雪"),
+    "资金财政统计类": ("资金", "财政", "预算", "经费", "补助", "亿元", "万元", "投资", "金融", "利润", "价格", "支出"),
+    "生态环境治理类": ("生态", "环境", "污染", "水质", "水资源", "能源", "低碳", "绿色", "气候", "排放", "废物", "固体废物"),
+    "教育教学管理类": ("教学", "教师", "学生", "课程", "教育", "学院", "学校", "本科", "人才", "培养", "毕业", "招生"),
+    "养老服务机构类": ("老年", "养老", "老年公寓", "公寓", "康养", "适老", "老人", "护理院", "养老院"),
+    "制造业产业统计类": ("制造", "制造业", "工业", "生产", "装备", "行业", "增加值", "高技术", "规模以上", "器件", "制品业"),
+    "居民收入统计类": ("居民", "收入", "人均", "可支配", "净收入", "工资", "消费"),
+    "社会民生指标类": ("人口", "卫生", "汽车", "里程", "住房", "民生", "政务", "公开", "招聘", "公务员"),
+    "城市月度指标类": ("城市", "成都", "重庆", "兰州", "西安", "江门", "城乡", "街区", "新区"),
+    "项目案件信息类": ("项目", "案件", "企业", "科技", "创新", "合作", "政策", "政府", "规划", "审批", "开发", "合同", "协议"),
+}
+
+ANCHOR_EMBEDDING_WEIGHT = 3.0
+
 
 @dataclass
 class Problem1GraphResult:
@@ -94,11 +123,14 @@ def run_problem1_graph_model(
     word_graph, graph_stats = _build_ppmi_graph(texts, terms)
     propagated = _two_hop_propagation(doc_word, word_graph)
     structure = _structure_business_matrix(history)
-    enhanced = sparse.hstack([propagated, structure], format="csr")
+    anchor_features = _anchor_feature_matrix(texts, history)
+    enhanced = sparse.hstack([propagated, structure, sparse.csr_matrix(anchor_features * ANCHOR_EMBEDDING_WEIGHT)], format="csr")
     enhanced = Normalizer(copy=False).fit_transform(enhanced)
 
     embedding_dim = min(80, max(2, enhanced.shape[1] - 1), max(2, enhanced.shape[0] - 1))
     embedding = TruncatedSVD(n_components=embedding_dim, random_state=random_state).fit_transform(enhanced)
+    anchor_embedding = StandardScaler().fit_transform(anchor_features)
+    embedding = np.hstack([embedding, anchor_embedding * ANCHOR_EMBEDDING_WEIGHT])
     embedding = StandardScaler().fit_transform(embedding)
     n_clusters = max(2, min(n_clusters, len(history)))
     model = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=20)
@@ -235,6 +267,36 @@ def _structure_business_matrix(frame: pd.DataFrame) -> sparse.csr_matrix:
     return sparse.csr_matrix(scaled)
 
 
+def _anchor_feature_matrix(texts: list[str], frame: pd.DataFrame) -> np.ndarray:
+    """Weak business anchors keep broad office terms from dominating clusters."""
+
+    rows: list[list[float]] = []
+    for text, (_, row) in zip(texts, frame.iterrows()):
+        text = "" if pd.isna(text) else str(text)
+        row_features: list[float] = []
+        for topic_name, anchors in TOPIC_ANCHORS.items():
+            hits = sum(text.count(anchor) for anchor in anchors)
+            score = math.log1p(hits)
+            if topic_name == "资金财政统计类" and int(row.get("has_money", 0) or 0):
+                score += 0.75
+            if topic_name == "项目案件信息类" and int(row.get("has_project", 0) or 0):
+                score += 0.55
+            if topic_name == "项目案件信息类" and int(row.get("has_contract", 0) or 0):
+                score += 0.65
+            if topic_name == "教育教学管理类" and any(term in text for term in ("教学", "教师", "学生", "课程", "学院")):
+                score += 0.35
+            if topic_name == "养老服务机构类" and any(term in text for term in ("老年", "养老", "公寓")):
+                score += 0.35
+            row_features.append(score)
+        rows.append(row_features)
+    matrix = np.asarray(rows, dtype=float)
+    if matrix.size == 0:
+        return np.zeros((len(frame), len(TOPIC_ANCHORS)), dtype=float)
+    maximum = matrix.max(axis=1, keepdims=True)
+    maximum[maximum <= 0] = 1.0
+    return matrix / maximum
+
+
 def _topic_summary(
     assignments: pd.DataFrame,
     history: pd.DataFrame,
@@ -292,6 +354,8 @@ def _ctfidf_tokens(text: str) -> list[str]:
 def _is_bad_token(token: str) -> bool:
     if len(set(token)) == 1:
         return True
+    if token in GENERIC_TOPIC_TERMS:
+        return True
     return any(noise in token for noise in NOISE_TERMS)
 
 
@@ -307,21 +371,27 @@ def _representatives(group: pd.DataFrame, top_terms: list[str], top_n: int = 4) 
 
 def _name_topic(terms: list[str], group: pd.DataFrame) -> str:
     joined = "".join(terms)
+    if any(term in joined for term in ("药品", "试验", "申请", "标准")):
+        return "医药项目审批类"
+    if any(term in joined for term in ("固定资产", "固定资", "价格指数", "价格指", "资产投资")):
+        return "投资价格统计类"
     if any(term in joined for term in ("冰雪", "滑雪", "长春")):
         return "文旅活动评价类"
+    if any(term in joined for term in ("合同", "协议", "工程", "审批", "案件")):
+        return "项目案件信息类"
     if any(term in joined for term in ("老年公寓", "老年", "养老", "公寓")):
         return "养老服务机构类"
-    if any(term in joined for term in ("教学", "教师", "学生", "课程", "学院")):
+    if any(term in joined for term in ("普通高中", "普通高", "初中", "高中", "小学", "职业", "专科")):
+        return "教育基础统计类"
+    if any(term in joined for term in ("教学", "教师", "学生", "课程", "学院", "学校", "普通高中", "初中", "小学")):
         return "教育教学管理类"
-    if any(term in joined for term in ("污染", "环境", "水资源", "水质")):
+    if any(term in joined for term in ("污染", "环境", "水资源", "水质", "固体废物", "废物")):
         return "生态环境治理类"
     if any(term in joined for term in ("居民", "可支配", "支配收入", "人均")):
         return "居民收入统计类"
     if any(term in joined for term in ("资金", "收入", "支出", "亿元", "预算", "经费")) or group.get("has_money", pd.Series(dtype=int)).sum() >= max(8, len(group) * 0.15):
         return "资金财政统计类"
-    if any(term in joined for term in ("生产总值", "国内生产", "总值")):
-        return "宏观经济统计类"
-    if any(term in joined for term in ("制造业", "制品业", "设备制造", "金属")):
+    if any(term in joined for term in ("制造业", "制品业", "设备制造", "金属", "生产总值", "国内生产", "总值")):
         return "制造业产业统计类"
     if any(term in joined for term in ("服务业", "批发", "零售", "仓储")):
         return "服务业经营统计类"

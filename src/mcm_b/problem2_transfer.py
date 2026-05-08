@@ -25,9 +25,11 @@ from sklearn.metrics import pairwise_distances
 from sklearn.preprocessing import Normalizer, StandardScaler
 
 from .problem1_innovative import (
+    ANCHOR_EMBEDDING_WEIGHT,
     BUSINESS_COLUMNS,
     NOISE_TERMS,
     STRUCTURE_COLUMNS,
+    _anchor_feature_matrix,
     _build_ppmi_graph,
     _history_frame,
     _modeling_text,
@@ -125,13 +127,24 @@ def run_problem2_transfer_model(
 
     source_propagated = _two_hop_propagation(source_doc_word, word_graph)
     feature_scaler, source_numeric = _fit_numeric_features(history)
-    source_enhanced = sparse.hstack([source_propagated, source_numeric * META_FEATURE_WEIGHT], format="csr")
+    source_anchor = _anchor_feature_matrix(source_texts, history)
+    anchor_scaler = StandardScaler()
+    source_anchor_scaled = anchor_scaler.fit_transform(source_anchor) * ANCHOR_EMBEDDING_WEIGHT
+    source_enhanced = sparse.hstack(
+        [
+            source_propagated,
+            source_numeric * META_FEATURE_WEIGHT,
+            sparse.csr_matrix(source_anchor * ANCHOR_EMBEDDING_WEIGHT),
+        ],
+        format="csr",
+    )
     normalizer = Normalizer(copy=False)
     source_enhanced = normalizer.fit_transform(source_enhanced)
 
     embedding_dim = min(80, max(2, source_enhanced.shape[1] - 1), max(2, source_enhanced.shape[0] - 1))
     reducer = TruncatedSVD(n_components=embedding_dim, random_state=random_state)
     source_embedding = reducer.fit_transform(source_enhanced)
+    source_embedding = np.hstack([source_embedding, source_anchor_scaled])
     embedding_scaler = StandardScaler()
     source_embedding = embedding_scaler.fit_transform(source_embedding)
 
@@ -165,9 +178,18 @@ def run_problem2_transfer_model(
         target_doc_word = vectorizer.transform(target_texts).tocsr()
         target_propagated = _two_hop_propagation(target_doc_word, word_graph)
         target_numeric = _transform_numeric_features(target_modelable, feature_scaler)
-        target_enhanced = sparse.hstack([target_propagated, target_numeric * META_FEATURE_WEIGHT], format="csr")
+        target_anchor = _anchor_feature_matrix(target_texts, target_modelable)
+        target_anchor_scaled = anchor_scaler.transform(target_anchor) * ANCHOR_EMBEDDING_WEIGHT
+        target_enhanced = sparse.hstack(
+            [
+                target_propagated,
+                target_numeric * META_FEATURE_WEIGHT,
+                sparse.csr_matrix(target_anchor * ANCHOR_EMBEDDING_WEIGHT),
+            ],
+            format="csr",
+        )
         target_enhanced = normalizer.transform(target_enhanced)
-        target_embedding = embedding_scaler.transform(reducer.transform(target_enhanced))
+        target_embedding = embedding_scaler.transform(np.hstack([reducer.transform(target_enhanced), target_anchor_scaled]))
         distances = pairwise_distances(target_embedding, cluster_model.cluster_centers_, metric="euclidean")
         source_distances = pairwise_distances(source_embedding, cluster_model.cluster_centers_, metric="euclidean")
         distance_probabilities = _distance_probabilities(distances, np.min(source_distances, axis=1))
@@ -497,15 +519,15 @@ def _finalize_states(frame: pd.DataFrame) -> pd.DataFrame:
         mii = result.loc[modelable, "MII"].astype(float)
 
         clear = (
-            (p1 >= 0.34)
-            & (ars >= 0.36)
-            & (margin >= 0.18)
-            & (entropy <= 0.88)
+            (p1 >= 0.30)
+            & (ars >= 0.30)
+            & (margin >= 0.12)
+            & (entropy <= 0.90)
             & (mii >= 0.03)
         )
         probability_margin = result.loc[modelable, "probability_margin"].astype(float)
-        overlap = ((margin < 0.10) | ((p1 < 0.26) & (probability_margin < 0.03))) & ~clear
-        unknown = ((p1 < 0.18) | (entropy > 0.92) | (result.loc[modelable, "parse_quality"].astype(float) < 0.35)) & ~clear
+        overlap = ((margin < 0.08) | ((p1 < 0.22) & (probability_margin < 0.025))) & ~clear
+        unknown = ((p1 < 0.16) | (entropy > 0.97) | (result.loc[modelable, "parse_quality"].astype(float) < 0.35)) & ~clear
 
         modelable_index = result.index[modelable]
         result.loc[modelable_index[clear.to_numpy()], "state"] = "A_clear_auto_archive"
@@ -806,6 +828,11 @@ def _topic_name_en(topic_name: object) -> str:
         "制造业产业统计类": "Manufacturing",
         "居民收入统计类": "Income",
         "城市月度指标类": "City Monthly",
+        "医药项目审批类": "Medical Approval",
+        "地区统计指标类": "Regional Indicators",
+        "投资价格统计类": "Investment Price",
+        "教育基础统计类": "Basic Education",
+        "未明确主题": "Unclear Topic",
     }
     text = "" if pd.isna(topic_name) else str(topic_name)
     return names.get(text, "Topic")

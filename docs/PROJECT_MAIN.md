@@ -58,6 +58,39 @@
 Q_i = 0.20 q_text + 0.25 q_ocr + 0.20 q_layout + 0.20 q_business + 0.15 q_format
 ```
 
+## 2026-05-08 附录与符号说明整理
+
+当前新增论文收尾材料：
+
+```text
+docs/附录与支撑材料.md
+docs/数学符号定义与说明.md
+```
+
+已完成内容：
+
+```text
+1. 按论文附录要求整理支撑材料列表：包含实际使用软件、运行命令、源程序文件名及作用。
+2. 按论文附录要求整理结果文件列表：覆盖清洗、问题一、问题二、问题三和最终交付结果。
+3. 附录 3 仅列求解代码粘贴顺序，不在 Markdown 中展开源码，便于后续由论文手自行复制。
+4. 新建符号说明文件，按“数学符号 LaTeX + 符号说明”的格式逐行列出全文主要符号。
+5. 为避免符号冲突，问题三是否进入复核队列的决策变量统一改为 \delta_i；问题二预测类别仍为 y_i。
+6. 为避免 L 的歧义，MII 解释词数量统一为 L_e，资源场景时间上限保留 L_s。
+```
+
+当前符号统一结论：
+
+```text
+y_i: 预测主题类别
+\delta_i: 是否进入人工复核队列
+P_i: 综合优先级
+\mathbf{p}_i: 类别概率向量
+C: 业务锚点特征矩阵
+L_s: 场景 s 的人工复核时间上限
+K_s: 场景 s 的人工复核数量上限
+L_e: MII 解释词数量
+```
+
 其中 `q_business` 不再强制要求每个文件都有日期和金额；只有当文件命中截止/资金相关语义时，才把日期/金额缺失作为完整性风险。这样避免把普通通知、统计图、短片段误判为低质量。
 
 2. 复核优先级：
@@ -461,6 +494,394 @@ dataset3_TAI = 0.590697
 - [x] 验证代码可编译：`python -m compileall src\mcm_b scripts\run_problem2_transfer.py` 通过。
 - [ ] `python -m unittest discover -s tests` 当前无法运行，因为工作区没有可导入的 `tests/` 目录；如需测试，应补建测试目录或运行既有独立测试脚本。
 - [x] 新增 `docs/problem2论文描述.md`，汇总题目二算法步骤、数学推导、模型参数、输出解释和图表解释。
+
+## 2026-05-08 题目三创新实现记录
+
+用户要求开始解决最后的问题三：继续阅读 `docs/题目.md` 与 `docs/解析.md`，结合问题二结果，加入自己的创新思路，完成代码实现并生成好看的输出；论文描述需等用户审核通过后再写。
+
+### 当前问题定义
+
+问题三承接问题二的迁移归属结果，需要对数据集 2、数据集 3 的 4519 条后续流入文件，从以下三方面划分高/中/低等级：
+
+1. 紧急程度：识别高时效、限期、通知、公示、考试、会议、整改等文件。
+2. 错分风险：利用问题二概率、熵、主次类边际差、迁移适用性和解析质量判断分类不稳定性。
+3. 复核必要性：综合主题不明确、类别重叠、低解释性、资金相关和高时效信号。
+
+重点关注对象：
+
+```text
+主题不明确文件：C_unknown_expert_review
+多类别重叠文件：B_overlap_manual_review
+高时效文件：含 deadline/urgent/通知/公示/截止/会议/考试等信号
+资金分配相关文件：含 资金/财政/预算/补助/经费/投资/收入/支出 等信号
+```
+
+最终目标是在数据集 4 的 S1/S2/S3 三种资源约束下，判断是否需要人工复核、给出复核优先顺序，并比较三种场景下的处理效果。
+
+### 已完成内容
+
+新增代码：
+
+```text
+src/mcm_b/problem3_optimization.py
+scripts/run_problem3_optimization.py
+```
+
+运行命令：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_problem3_optimization.py --cleaning-dir outputs\b_problem\cleaning_ocr_full --problem2-dir outputs\b_problem\problem2_transfer --output-dir outputs\b_problem\problem3_optimization
+```
+
+输出目录：
+
+```text
+outputs/b_problem/problem3_optimization/
+├── problem3_risk_priority.csv                         # 每条文件的三维评分、等级、重点原因和建议动作
+├── problem3_level_summary.csv                         # 紧急/风险/复核必要性/综合优先级的高中低分布
+├── problem3_scenario_comparison.csv                   # S1/S2/S3 资源约束对比
+├── problem3_special_focus.csv                         # 主题不明确、高时效、资金相关样本清单
+├── problem3_review_queue_S1.csv                       # S1 复核队列
+├── problem3_review_queue_S2.csv                       # S2 复核队列
+├── problem3_review_queue_S3.csv                       # S3 复核队列
+├── problem3_auto_archive_S1.csv                       # S1 自动归档队列
+├── problem3_auto_archive_S2.csv                       # S2 自动归档队列
+├── problem3_auto_archive_S3.csv                       # S3 自动归档队列
+├── problem3_optimization_report.md                    # 审核用 Markdown 报告
+├── problem3_metrics.json                              # 模型参数与运行指标
+├── problem3_level_distribution.png                    # 三维等级分布图
+├── problem3_level_distribution_plot_data.csv
+├── problem3_level_distribution.png.csv
+├── problem3_scenario_comparison.png                   # 三场景处理量对比图
+├── problem3_scenario_comparison_plot_data.csv
+├── problem3_scenario_comparison.png.csv
+├── problem3_action_distribution.png                   # 建议动作分布图
+├── problem3_action_distribution_plot_data.csv
+├── problem3_action_distribution.png.csv
+├── problem3_review_queue_topic_distribution.png       # 复核队列主题分布图
+├── problem3_review_queue_topic_distribution_plot_data.csv
+└── problem3_review_queue_topic_distribution.png.csv
+```
+
+和问题二保持一致：每张 PNG 都有 `*_plot_data.csv` 和 `*.png.csv` 两份同源作图数据，包含中文标签、英文标签和原始数值，方便论文手重画图。
+
+### 创新模型实现
+
+当前题目三采用“熵权-AHP 融合 + 特殊关注增强 + 资源约束优先队列”的治理优化模型，可称为：
+
+```text
+RTF-RPO: Risk-Timeliness-Fund Review Priority Optimizer
+```
+
+核心思路不是把问题三简化成单一阈值判断，而是把每个文件拆成三个治理维度：
+
+1. `urgency_score`：时效信号、截止/紧急字段、日期新近性、项目属性。
+2. `misclassification_risk_score`：问题二分类不确定性，包括 `1-p1`、归一化熵、`1-relative_margin`、`1-TAI`、`1-parse_quality`。
+3. `review_necessity_score`：人工复核必要性，包括问题二状态、错分风险、`1-MII`、资金信号和时效信号。
+
+特殊关注增强项：
+
+```text
+special_focus = 主题不明确 or 高时效 or 资金相关
+priority_score = base_priority_score * (1 + mu * special_focus)
+mu = 0.18
+```
+
+资源分配策略：
+
+1. `C_unknown_expert_review` 和 `B_overlap_manual_review` 属于必须复核池，优先进入资源分配。
+2. 高时效/资金相关但仍可归档的文件进入 `priority_sampling`，作为重点抽检池。
+3. 同一优先层内按照 `overall_level`、`priority_score`、`value_density` 排序。
+4. 自动归档池按照 `archive_score = 0.45*p1 + 0.35*ARS + 0.20*MII` 排序。
+5. 每个场景同时满足人工工时上限、人工复核数量上限和自动归档数量上限。
+
+### 数据集 4 资源约束
+
+当前从 `B题数据集/数据集4：业务规则与资源约束表.xlsx` 读取三种场景：
+
+| 场景 | 人工工时/天 | 自动归档上限/天 | 人工复核上限/天 |
+| --- | ---: | ---: | ---: |
+| S1 | 60 | 1200 | 200 |
+| S2 | 80 | 1500 | 300 |
+| S3 | 100 | 1800 | 400 |
+
+注意：最终复核条数低于人工复核上限，是因为每条文件估计复核时间不同；模型优先填满人工工时约束，而不是机械凑满件数约束。
+
+### 参数定义
+
+主观权重：
+
+```text
+urgency = 0.34
+misclassification_risk = 0.38
+review_necessity = 0.28
+```
+
+客观熵权：
+
+```text
+urgency = 0.912352
+misclassification_risk = 0.014840
+review_necessity = 0.072808
+```
+
+融合方式：
+
+```text
+combined_weight = (1 - entropy_blend) * subjective_weight + entropy_blend * entropy_weight
+entropy_blend = 0.35
+```
+
+最终综合权重：
+
+```text
+urgency = 0.540323
+misclassification_risk = 0.252194
+review_necessity = 0.207483
+```
+
+等级划分规则：
+
+```text
+高：score >= Q70
+中：Q30 <= score < Q70
+低：score < Q30
+```
+
+复核时间估计：
+
+```text
+base = 10 + min(16, log(1 + text_length) * 1.8)
+C_unknown_expert_review: +7 min
+B_overlap_manual_review: +4 min
+资金相关: +3 min
+高时效: +2 min
+最终限制在 8-35 min
+```
+
+### 已验证结论
+
+代码验证：
+
+```text
+python -m compileall src\mcm_b\problem3_optimization.py scripts\run_problem3_optimization.py
+结果：通过
+```
+
+等级分布：
+
+| 维度 | 高 | 中 | 低 |
+| --- | ---: | ---: | ---: |
+| 紧急程度 | 1622 | 2738 | 159 |
+| 错分风险 | 1356 | 1807 | 1356 |
+| 复核必要性 | 1356 | 1807 | 1356 |
+| 综合优先级 | 1357 | 1806 | 1356 |
+
+资源场景对比：
+
+| 场景 | 复核数 | 复核工时 | 人工利用率 | 自动归档数 | 延后处理数 | 覆盖复核价值 | 剩余风险值 | 未知复核 | 重叠复核 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| S1 | 139 | 59.929 | 0.998816 | 1200 | 3180 | 89.095011 | 1571.252062 | 47 | 92 |
+| S2 | 188 | 79.844 | 0.998044 | 1500 | 2831 | 116.972854 | 1437.748244 | 58 | 130 |
+| S3 | 237 | 99.927 | 0.999265 | 1800 | 2482 | 144.373171 | 1295.410566 | 78 | 159 |
+
+中间结论：
+
+- S3 资源最充足，能够复核更多主题不明确和重叠样本，剩余风险最低，适合高风险时期或正式归档前集中治理。
+- S1 资源最紧，应优先处理 C/B 必须复核文件中的高优先级样本，并将重点抽检与低风险自动归档延后。
+- 三个场景人工利用率均接近 100%，说明队列选择充分利用了数据集 4 的人工工时预算。
+- 队列前排主要是 `C_unknown_expert_review` 且同时命中“主题不明确、高时效、资金相关”的样本，符合题目对重点关注对象的要求。
+- 当前模型输出了自动归档队列和人工复核队列，可直接作为实际办公场景下的日处理建议清单。
+
+### TODO
+
+- [x] 完成题目三创新复核优先级与资源约束优化代码。
+- [x] 生成三维等级表、场景对比表、复核队列、自动归档队列、重点关注样本表和审核报告。
+- [x] 为每张题目三 PNG 图同步输出中英文作图数据表：`*_plot_data.csv` 与 `*.png.csv`。
+- [x] 修正复核队列排序：C/B 必须复核类优先，重点抽检类次之，同层内按综合优先级排序。
+- [x] 验证代码可编译。
+- [x] 已新增 `docs/problem3论文描述.md`。
+
+## 2026-05-08 全流程重跑与最终验收记录
+
+用户要求清空 `outputs/b_problem` 后，从数据清洗开始完整重跑三问，并检查解析文末建议的五类结果表和图。
+
+### 已完成内容
+
+- 已清空 `outputs/b_problem` 旧结果并从全量清洗重跑。
+- 已完成全量 OCR 清洗、问题一创新主题建模、问题二迁移归属、问题三复核优化。
+- 已新增最终交付汇总脚本：`scripts/build_final_deliverables.py`。
+- 已生成最终论文结果目录：`outputs/b_problem/final_results/`。
+- 已新建 `docs/problem3论文描述.md`。
+- 已同步更新 `docs/problem1论文描述.md` 与 `docs/problem2论文描述.md` 中的最新模型参数、阈值、结果表和符号说明。
+
+### 关键修正
+
+1. 问题一新增业务锚点增强：
+   - 新增 `TOPIC_ANCHORS` 和 `ANCHOR_EMBEDDING_WEIGHT = 3.0`。
+   - 将业务锚点矩阵 `A` 与图传播文本向量、结构业务特征一起融合。
+   - 修复纯聚类被“地区/单位/服务/项目”等泛词牵引的问题。
+
+2. 问题二同步使用业务锚点空间：
+   - 源域和目标域均拼接同一套锚点特征。
+   - 保持问题二与问题一主题空间一致。
+   - 根据锚点增强后的概率分布，调整状态阈值：
+
+```text
+A_clear_auto_archive:
+  p1 >= 0.30
+  ARS >= 0.30
+  relative_margin >= 0.12
+  entropy <= 0.90
+  MII >= 0.03
+
+B_overlap_manual_review:
+  relative_margin < 0.08
+  or (p1 < 0.22 and probability_margin < 0.025)
+
+C_unknown_expert_review:
+  p1 < 0.16
+  or entropy > 0.97
+  or parse_quality < 0.35
+```
+
+3. 问题三资源队列修正：
+   - 专家研判 `expert_review` 优先于重叠人工复核 `manual_review`。
+   - 重叠人工复核优先于重点抽检 `priority_sampling`。
+   - 场景对比表新增解析要求字段：`total_cost_index`、`max_completion_hours`、`unreviewed_risk_value`、`high_level_coverage_rate`。
+
+### 全流程命令
+
+```powershell
+$env:PADDLEOCR_DEVICE='gpu:0'
+.\.venv\Scripts\python.exe scripts\run_b_cleaning.py --output-dir outputs\b_problem\cleaning_ocr_full --max-chars 30000 --max-file-mb 25
+.\.venv\Scripts\python.exe scripts\run_problem1_innovative.py --cleaning-dir outputs\b_problem\cleaning_ocr_full --output-dir outputs\b_problem\problem1_innovative --clusters 10 --max-terms 2500
+.\.venv\Scripts\python.exe scripts\run_problem2_transfer.py --cleaning-dir outputs\b_problem\cleaning_ocr_full --output-dir outputs\b_problem\problem2_transfer --clusters 10 --max-terms 2500
+.\.venv\Scripts\python.exe scripts\run_problem3_optimization.py --cleaning-dir outputs\b_problem\cleaning_ocr_full --problem2-dir outputs\b_problem\problem2_transfer --output-dir outputs\b_problem\problem3_optimization
+.\.venv\Scripts\python.exe scripts\build_final_deliverables.py --cleaning-dir outputs\b_problem\cleaning_ocr_full --problem1-dir outputs\b_problem\problem1_innovative --problem2-dir outputs\b_problem\problem2_transfer --problem3-dir outputs\b_problem\problem3_optimization --output-dir outputs\b_problem\final_results
+```
+
+### 清洗结果
+
+```text
+document_count = 7916
+block_count = 598480
+parse_success_count = 6733
+need_manual_check = 200
+ocr_rows = 1990
+avg_ocr_confidence = 0.989121
+```
+
+解析方式统计：
+
+```text
+dataset3_row_parse = 3518
+image_paddleocr = 1990
+image_sidecar_txt:utf-8-sig = 1127
+docx_parse = 617
+txt_parse:utf-8-sig = 351
+excel_parse = 176
+text_pdf = 76
+scanned_pdf_ocr_pending = 54
+scanned_pdf_text_low = 5
+metadata_only = 2
+```
+
+### 问题一结果
+
+```text
+source_document_count = 2225
+term_count = 2500
+clusters = 10
+silhouette = 0.035421
+calinski_harabasz = 39.333307
+davies_bouldin = 3.439216
+word_graph_edges = 366841
+word_graph_windows = 404135
+```
+
+主题体系：
+
+| topic_id | 主题名称 | 样本数 |
+| ---: | --- | ---: |
+| 6 | 资金财政统计类 | 567 |
+| 1 | 医药项目审批类 | 535 |
+| 4 | 地区统计指标类 | 375 |
+| 8 | 制造业产业统计类 | 256 |
+| 3 | 教育教学管理类 | 174 |
+| 2 | 生态环境治理类 | 136 |
+| 5 | 养老服务机构类 | 59 |
+| 0 | 投资价格统计类 | 49 |
+| 7 | 项目案件信息类 | 39 |
+| 9 | 教育基础统计类 | 35 |
+
+### 问题二结果
+
+```text
+target_document_count = 4519
+target_modelable_count = 4419
+target_unclassifiable_count = 100
+dataset2_TAI = 0.588393
+dataset3_TAI = 0.699263
+```
+
+数据集级评价：
+
+| 数据集 | 记录数 | 自动/辅助归档 | 清晰自动归档 | 重叠复核 | 未知专家复核 | 平均主类概率 | 平均 ARS | 平均 MII | 平均熵 | TAI |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dataset2 | 1001 | 787 | 57 | 134 | 80 | 0.233601 | 0.240491 | 0.266731 | 0.912906 | 0.588393 |
+| dataset3 | 3518 | 3263 | 1630 | 233 | 22 | 0.386241 | 0.418351 | 0.348885 | 0.771414 | 0.699263 |
+
+### 问题三结果
+
+场景对比：
+
+| 场景 | 复核数 | 总成本指数 | 最大完工时间/小时 | 未复核风险 | 高等级覆盖率 | 自动归档数 | 未知复核 | 重叠复核 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| S1 | 137 | 59.978900 | 59.979 | 1490.465329 | 0.101032 | 1200 | 102 | 34 |
+| S2 | 173 | 79.929683 | 79.930 | 1363.929117 | 0.127581 | 1500 | 102 | 71 |
+| S3 | 210 | 99.829683 | 99.830 | 1236.019877 | 0.154867 | 1800 | 102 | 108 |
+
+### 解析文末五类最终交付表
+
+输出目录：
+
+```text
+outputs/b_problem/final_results/
+```
+
+| 解析要求 | 当前输出 |
+| --- | --- |
+| 数据预处理统计表 | `data_preprocessing_statistics.csv` |
+| 问题一分类结果表 | `problem1_classification_result_table.csv` |
+| 问题二归属评价表 | `problem2_assignment_evaluation_table.csv` |
+| 问题三复核优先级表 | `problem3_review_priority_table.csv` |
+| 资源约束场景对比表 | `resource_scenario_comparison_table.csv` |
+
+### 输出图与作图数据
+
+已检查全部 PNG 均有同名 `.png.csv` 和 `_plot_data.csv`：
+
+```text
+final_results/data_preprocessing_file_type_distribution.png
+problem2_transfer/problem2_topic_distribution.png
+problem2_transfer/problem2_state_distribution.png
+problem2_transfer/problem2_ars_mii_scatter.png
+problem3_optimization/problem3_level_distribution.png
+problem3_optimization/problem3_scenario_comparison.png
+problem3_optimization/problem3_action_distribution.png
+problem3_optimization/problem3_review_queue_topic_distribution.png
+```
+
+### TODO
+
+- [x] 完成从清洗到三问的全流程重跑。
+- [x] 修正问题一泛词牵引和重复泛化主题问题。
+- [x] 修正问题二锚点增强后未知样本过多的问题。
+- [x] 修正问题三专家研判优先级。
+- [x] 生成五类最终交付表。
+- [x] 为所有 PNG 图生成同名作图数据。
+- [x] 新增问题三论文描述。
 
 ## 已完成内容
 

@@ -1,9 +1,3 @@
-"""Lightweight B problem data inspection.
-
-This script intentionally samples a tiny subset by default. Use it to validate
-paths and readers before running any larger experiment.
-"""
-
 from __future__ import annotations
 
 import argparse

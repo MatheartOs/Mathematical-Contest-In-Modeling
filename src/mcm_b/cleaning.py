@@ -1,10 +1,4 @@
 """Document cleaning pipeline for multi-source heterogeneous office files.
-
-This module follows the workflow in
-``docs/多源异构文件数据清洗流程说明文档.md``.  The primary output is a
-file-level ``document_index.csv`` plus block-level ``document_blocks.jsonl``.
-OCR is represented as an explicit pending/manual-check path when no OCR engine
-is available in the local environment.
 """
 
 from __future__ import annotations
