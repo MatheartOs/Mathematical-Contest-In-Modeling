@@ -69,7 +69,8 @@ def fit_topic_model(records: list[DocumentRecord], n_clusters: int | None = None
     vectorizer = TfidfVectorizer(
         analyzer="char",
         ngram_range=(2, 4),
-        min_df=1,
+        min_df=2,
+        max_df=0.85,
         max_features=10_000,
         sublinear_tf=True,
     )

@@ -57,6 +57,22 @@ BUSINESS_SYNONYMS: dict[str, tuple[str, ...]] = {
 
 ORG_SUFFIXES = ("学院", "部", "处", "办公室", "中心", "委员会", "公司", "单位", "小组", "项目组", "局", "厅")
 
+QUALITY_WEIGHTS = {
+    "text": 0.20,
+    "ocr": 0.25,
+    "layout": 0.20,
+    "business": 0.20,
+    "format": 0.15,
+}
+
+REVIEW_PRIORITY_WEIGHTS = {
+    "quality_risk": 0.45,
+    "ocr_risk": 0.15,
+    "short_text_risk": 0.15,
+    "business_risk": 0.15,
+    "format_risk": 0.10,
+}
+
 
 @dataclass
 class FileManifestRow:
@@ -131,6 +147,10 @@ class CleanedDocument:
     ocr_page_count: int
     parse_quality: float
     missing_rate: float
+    hard_manual_check: int
+    manual_review_priority: float
+    archive_decision: str
+    resource_scenario: str
     need_manual_check: int
     manual_check_reason: str
     keywords_tfidf: str
@@ -210,6 +230,7 @@ def clean_all_documents(
             print(f"[cleaning] parsed {index}/{len(manifest)}")
 
     document_index = pd.DataFrame(asdict(document) for document in documents)
+    document_index = apply_resource_aware_review_policy(document_index)
     manifest_frame = pd.DataFrame(asdict(row) for row in manifest)
     parse_log = pd.DataFrame(parse_rows)
     return document_index, blocks, manifest_frame, parse_log, errors
@@ -236,6 +257,7 @@ def write_cleaning_outputs(
     _write_blocks_jsonl(processed / "document_blocks.jsonl", blocks)
     _write_business_dictionary(processed / "business_dictionary.json")
     _write_manual_check_list(processed / "manual_check_list.csv", document_index)
+    _write_resource_review_allocations(processed, document_index)
     (logs / "error_log.txt").write_text("\n".join(errors), encoding="utf-8")
     _write_ocr_log(logs / "ocr_log.csv", document_index)
 
@@ -605,6 +627,14 @@ def _build_document_index_row(row: FileManifestRow, content: ParsedContent) -> C
     keywords = extract_keywords(clean_text, top_n=12)
     business_keywords = sorted({term for terms in matched_terms.values() for term in terms})
     quality, missing_rate, manual, reason = quality_score(row, content, clean_text, title, dates, amounts, flags)
+    priority = manual_review_priority(
+        parse_quality=quality,
+        ocr_used=content.ocr_used,
+        ocr_confidence=content.ocr_confidence,
+        parse_success=content.parse_success,
+        text_length=len(clean_text),
+        flags=flags,
+    )
     paragraph_lengths = [len(paragraph) for paragraph in paragraphs]
     return CleanedDocument(
         file_id=row.file_id,
@@ -650,6 +680,10 @@ def _build_document_index_row(row: FileManifestRow, content: ParsedContent) -> C
         ocr_page_count=content.ocr_page_count,
         parse_quality=quality,
         missing_rate=missing_rate,
+        hard_manual_check=manual,
+        manual_review_priority=priority,
+        archive_decision="pending_review_policy",
+        resource_scenario="",
         need_manual_check=manual,
         manual_check_reason=reason,
         keywords_tfidf=json.dumps(keywords, ensure_ascii=False),
@@ -759,26 +793,169 @@ def quality_score(
     amounts: list[float],
     flags: dict[str, int],
 ) -> tuple[float, float, int, str]:
-    q_text = min(len(clean_text) / 800, 1.0) if clean_text else 0.0
+    text_length = len(clean_text)
+    q_text = min(text_length / _expected_text_length(row, content), 1.0) if clean_text else 0.0
     q_ocr = 1.0 if not content.ocr_used and content.parse_success else content.ocr_confidence
     q_layout = content.layout_score
-    key_fields = [bool(title), bool(clean_text), bool(dates), bool(amounts), any(flags.values())]
+    business_signal = any(flags.values())
+    q_business = (
+        0.45 * float(bool(title))
+        + 0.35 * float(text_length >= _short_text_limit(row.dataset_id))
+        + 0.20 * float(business_signal or bool(dates) or bool(amounts))
+    )
+    if content.parse_method.startswith("image_sidecar"):
+        q_business = 0.40
+    key_fields = [
+        bool(clean_text),
+        bool(title),
+        bool(business_signal),
+        bool(dates) if flags.get("has_deadline", 0) else True,
+        bool(amounts) if flags.get("has_money", 0) else True,
+    ]
     missing = key_fields.count(False)
-    q_complete = 1 - missing / len(key_fields)
     q_format = 1.0 if content.parse_success else 0.0
-    score = round(0.30 * q_text + 0.20 * q_ocr + 0.20 * q_layout + 0.20 * q_complete + 0.10 * q_format, 4)
+    score = round(
+        QUALITY_WEIGHTS["text"] * q_text
+        + QUALITY_WEIGHTS["ocr"] * q_ocr
+        + QUALITY_WEIGHTS["layout"] * q_layout
+        + QUALITY_WEIGHTS["business"] * q_business
+        + QUALITY_WEIGHTS["format"] * q_format,
+        4,
+    )
     reasons: list[str] = []
-    if score < 0.5:
-        reasons.append("parse_quality_below_0.5")
-    elif score < 0.7:
-        reasons.append("parse_quality_between_0.5_and_0.7")
-    if len(clean_text) < 80:
+    sidecar = content.parse_method.startswith("image_sidecar")
+    if content.parse_method in {"scanned_pdf_ocr_pending", "metadata_only"}:
+        reasons.append(content.error_message or content.parse_method)
+    if content.parse_success == 0 and not sidecar:
+        reasons.append("parse_failed")
+    if text_length < _short_text_limit(row.dataset_id) and not sidecar:
         reasons.append("text_too_short")
-    if row.file_ext in IMAGE_EXTENSIONS or "ocr" in content.parse_method:
-        reasons.append("ocr_required_or_pending")
-    if content.error_message:
-        reasons.append(content.error_message)
-    return score, round(missing / len(key_fields), 4), int(bool(reasons)), "; ".join(reasons)
+    if content.ocr_used and content.ocr_confidence < 0.75:
+        reasons.append("ocr_confidence_below_0.75")
+    if score < 0.45 and not sidecar:
+        reasons.append("parse_quality_below_0.45")
+    if sidecar:
+        reasons.append("image_sidecar_metadata_only")
+    return score, round(missing / len(key_fields), 4), int(bool(reasons) and not sidecar), "; ".join(dict.fromkeys(reasons))
+
+
+def _expected_text_length(row: FileManifestRow, content: ParsedContent) -> int:
+    if row.dataset_id == "dataset3":
+        return 120
+    if content.ocr_used:
+        return 300
+    if content.parse_method == "excel_parse":
+        return 250
+    if content.parse_method.startswith("image_sidecar"):
+        return 80
+    return 600
+
+
+def _short_text_limit(dataset_id: str) -> int:
+    return 40 if dataset_id == "dataset3" else 80
+
+
+def manual_review_priority(
+    parse_quality: float,
+    ocr_used: int,
+    ocr_confidence: float,
+    parse_success: int,
+    text_length: int,
+    flags: dict[str, int],
+) -> float:
+    business_risk = float(any(flags.get(key, 0) for key in ("has_money", "has_deadline", "has_urgent", "has_contract")))
+    short_text_risk = 1.0 - min(text_length / 80, 1.0)
+    ocr_risk = (1.0 - ocr_confidence) if ocr_used else 0.0
+    format_risk = 1.0 - float(bool(parse_success))
+    priority = (
+        REVIEW_PRIORITY_WEIGHTS["quality_risk"] * (1.0 - parse_quality)
+        + REVIEW_PRIORITY_WEIGHTS["ocr_risk"] * ocr_risk
+        + REVIEW_PRIORITY_WEIGHTS["short_text_risk"] * short_text_risk
+        + REVIEW_PRIORITY_WEIGHTS["business_risk"] * business_risk
+        + REVIEW_PRIORITY_WEIGHTS["format_risk"] * format_risk
+    )
+    return round(float(max(0.0, min(priority, 1.0))), 6)
+
+
+def apply_resource_aware_review_policy(document_index: pd.DataFrame) -> pd.DataFrame:
+    """Limit the default manual-review list by dataset 4 resource constraints."""
+
+    if document_index.empty:
+        return document_index
+
+    frame = document_index.copy()
+    capacities = _scenario_manual_capacities()
+    baseline_scenario = min(capacities, key=capacities.get) if capacities else "S1"
+    baseline_capacity = capacities.get(baseline_scenario, int(frame["hard_manual_check"].sum()))
+    eligible = _review_eligible_mask(frame)
+    selected = _select_review_queue(frame, capacity=baseline_capacity, eligible=eligible)
+
+    frame["need_manual_check"] = 0
+    frame.loc[selected, "need_manual_check"] = 1
+    frame["resource_scenario"] = ""
+    frame.loc[selected, "resource_scenario"] = baseline_scenario
+    frame["archive_decision"] = "auto_archive"
+    frame.loc[frame["parse_method"].astype(str).str.startswith("image_sidecar"), "archive_decision"] = "metadata_archive"
+    frame.loc[(frame["parse_success"].fillna(0).astype(int) == 0) & eligible & ~selected, "archive_decision"] = "deferred_parse_repair"
+    frame.loc[selected, "archive_decision"] = "manual_review"
+
+    optional_selected = selected & (frame["hard_manual_check"].fillna(0).astype(int) == 0)
+    frame.loc[optional_selected, "manual_check_reason"] = frame.loc[optional_selected].apply(
+        lambda row: _append_reason(str(row.get("manual_check_reason", "")), "resource_priority_audit"),
+        axis=1,
+    )
+    return frame
+
+
+def _scenario_manual_capacities() -> dict[str, int]:
+    if not DATASET4_XLSX.exists():
+        return {}
+    scenarios = pd.read_excel(DATASET4_XLSX)
+    if "场景编号" not in scenarios or "人工复核能力上限（份/天）" not in scenarios:
+        return {}
+    capacities: dict[str, int] = {}
+    for _, row in scenarios.iterrows():
+        if pd.isna(row.get("场景编号")) or pd.isna(row.get("人工复核能力上限（份/天）")):
+            continue
+        count_limit = int(row["人工复核能力上限（份/天）"])
+        if "每日可用人工工时（小时）" in scenarios and not pd.isna(row.get("每日可用人工工时（小时）")):
+            hour_limit = int(float(row["每日可用人工工时（小时）"]) * 60 // 18)
+            count_limit = min(count_limit, hour_limit)
+        capacities[str(row["场景编号"])] = count_limit
+    return capacities
+
+
+def _review_eligible_mask(frame: pd.DataFrame) -> pd.Series:
+    parse_method = frame["parse_method"].fillna("").astype(str)
+    return (
+        frame["dataset_id"].isin(["dataset1", "dataset2", "dataset3"])
+        & ~parse_method.str.startswith("image_sidecar")
+    )
+
+
+def _select_review_queue(frame: pd.DataFrame, capacity: int, eligible: pd.Series) -> pd.Series:
+    selected = pd.Series(False, index=frame.index)
+    hard = eligible & (frame["hard_manual_check"].fillna(0).astype(int) == 1)
+    selected.loc[hard] = True
+    remaining = max(0, int(capacity) - int(selected.sum()))
+    if remaining <= 0:
+        return selected
+    optional = frame[eligible & ~selected].copy()
+    if optional.empty:
+        return selected
+    optional = optional.sort_values(
+        ["manual_review_priority", "parse_quality", "text_length"],
+        ascending=[False, True, True],
+    )
+    selected.loc[optional.head(remaining).index] = True
+    return selected
+
+
+def _append_reason(existing: str, reason: str) -> str:
+    parts = [part.strip() for part in existing.split(";") if part.strip()]
+    if reason not in parts:
+        parts.append(reason)
+    return "; ".join(parts)
 
 
 def _write_blocks_jsonl(path: Path, blocks: list[DocumentBlock]) -> None:
@@ -793,8 +970,46 @@ def _write_business_dictionary(path: Path) -> None:
 
 
 def _write_manual_check_list(path: Path, document_index: pd.DataFrame) -> None:
-    columns = ["file_id", "dataset_id", "file_name", "file_type", "parse_quality", "manual_check_reason", "file_path"]
+    columns = [
+        "file_id",
+        "dataset_id",
+        "file_name",
+        "file_type",
+        "parse_quality",
+        "manual_review_priority",
+        "hard_manual_check",
+        "archive_decision",
+        "resource_scenario",
+        "manual_check_reason",
+        "file_path",
+    ]
+    columns = [column for column in columns if column in document_index.columns]
     document_index[document_index["need_manual_check"] == 1][columns].to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def _write_resource_review_allocations(output_dir: Path, document_index: pd.DataFrame) -> None:
+    capacities = _scenario_manual_capacities()
+    if not capacities or document_index.empty:
+        return
+    eligible = _review_eligible_mask(document_index)
+    columns = [
+        "file_id",
+        "dataset_id",
+        "file_name",
+        "file_type",
+        "parse_method",
+        "parse_quality",
+        "manual_review_priority",
+        "hard_manual_check",
+        "manual_check_reason",
+        "file_path",
+    ]
+    columns = [column for column in columns if column in document_index.columns]
+    for scenario_id, capacity in capacities.items():
+        selected = _select_review_queue(document_index, capacity=capacity, eligible=eligible)
+        queue = document_index.loc[selected, columns].copy()
+        queue.insert(0, "scenario_id", scenario_id)
+        queue.to_csv(output_dir / f"manual_check_list_{scenario_id}.csv", index=False, encoding="utf-8-sig")
 
 
 def _write_ocr_log(path: Path, document_index: pd.DataFrame) -> None:

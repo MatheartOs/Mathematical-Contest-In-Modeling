@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 from time import perf_counter
 
@@ -110,13 +111,7 @@ def _build_model_frame(document_index: pd.DataFrame) -> pd.DataFrame:
     frame["dataset"] = frame["dataset_id"]
     frame["path"] = frame["file_path"]
     frame["extension"] = frame["file_type"]
-    frame["text"] = (
-        frame["title"].fillna("")
-        + "\n"
-        + frame["clean_text"].fillna("")
-        + "\n关键词:"
-        + frame["business_keywords"].fillna("")
-    )
+    frame["text"] = frame.apply(_modeling_text, axis=1)
     frame["status"] = frame["parse_success"].map(lambda value: "ok" if int(value) == 1 else "cleaning_low_quality")
     frame["size_bytes"] = (frame["file_size_kb"].fillna(0).astype(float) * 1024).astype(int)
     frame["text_length"] = frame["clean_text"].fillna("").map(len)
@@ -146,6 +141,21 @@ def _records_from_frame(frame: pd.DataFrame) -> list[DocumentRecord]:
             )
         )
     return records
+
+
+def _modeling_text(row: pd.Series) -> str:
+    title = "" if pd.isna(row.get("title")) else str(row.get("title"))
+    body = "" if pd.isna(row.get("clean_text")) else str(row.get("clean_text"))
+    keywords = "" if pd.isna(row.get("business_keywords")) else str(row.get("business_keywords"))
+    raw = "\n".join([title, body, keywords])
+    raw = re.sub(r"[A-Za-z0-9]+(?:[./:_-][A-Za-z0-9]+)*", " ", raw)
+    raw = re.sub(r"[^\u4e00-\u9fff]+", "", raw)
+    for noise in ("工作表名称", "行数", "列数", "表头字段", "主要关键词", "样例内容", "图片名称", "图片编号", "下载"):
+        raw = raw.replace(noise, "")
+    raw = re.sub(r"(关键词|通知|项目|资金|会议|合同|截止|紧急){4,}", r"\1", raw)
+    clean_title = re.sub(r"[^\u4e00-\u9fff]+", "", title)
+    clean_keywords = re.sub(r"[^\u4e00-\u9fff]+", "", keywords)
+    return f"{clean_title}{raw}{clean_keywords}"
 
 
 def _add_keyword_columns(frame: pd.DataFrame) -> None:
@@ -210,7 +220,18 @@ def _theme_distribution(features: pd.DataFrame, count_name: str) -> pd.DataFrame
 
 def _build_topic_summary(assignments: pd.DataFrame, topic_terms: dict[int, list[str]], features: pd.DataFrame) -> pd.DataFrame:
     merged = assignments.merge(
-        features[["doc_id", "dataset", "extension", "dominant_keyword_group", *[f"kw_{key}" for key in KEYWORD_GROUPS]]],
+        features[
+            [
+                "doc_id",
+                "dataset",
+                "extension",
+                "file_name",
+                "title",
+                "text_quality",
+                "dominant_keyword_group",
+                *[f"kw_{key}" for key in KEYWORD_GROUPS],
+            ]
+        ],
         on=["doc_id", "dataset", "extension"],
         how="left",
     )
@@ -219,6 +240,7 @@ def _build_topic_summary(assignments: pd.DataFrame, topic_terms: dict[int, list[
     for topic_id, group in merged.groupby("topic_id"):
         keyword_scores = group[keyword_columns].sum().sort_values(ascending=False)
         extension_counts = group["extension"].value_counts().head(4)
+        representatives = group.sort_values(["text_quality", "doc_id"], ascending=[False, True]).head(4)
         rows.append(
             {
                 "topic_id": int(topic_id),
@@ -227,12 +249,43 @@ def _build_topic_summary(assignments: pd.DataFrame, topic_terms: dict[int, list[
                 "top_terms": " / ".join(topic_terms.get(int(topic_id), [])[:10]),
                 "dominant_keyword_group": keyword_scores.index[0].replace("kw_", ""),
                 "dominant_extensions": "; ".join(f"{ext}:{count}" for ext, count in extension_counts.items()),
+                "representative_files": "; ".join(str(value) for value in representatives["doc_id"].tolist()),
+                "representative_titles": "; ".join(
+                    _short_title(title, file_name) for title, file_name in zip(representatives["title"], representatives["file_name"])
+                ),
             }
         )
     return pd.DataFrame(rows).sort_values("history_count", ascending=False)
 
 
+def _short_title(title: object, file_name: object) -> str:
+    text = "" if pd.isna(title) else str(title)
+    if not text:
+        text = "" if pd.isna(file_name) else str(file_name)
+    text = text.replace("\n", " ").strip()
+    return text[:36]
+
+
 def _suggest_label(keyword_group: str, terms: list[str]) -> str:
+    joined_terms = "".join(terms)
+    if any(term in joined_terms for term in ("黑龙江", "天津河北", "内蒙古", "地区")):
+        return "地区指标统计类"
+    if "生产总值" in joined_terms or "国内生产" in joined_terms:
+        return "宏观经济统计类"
+    if "冰雪" in joined_terms or "滑雪" in joined_terms:
+        return "文旅活动评价类"
+    if "制造业" in joined_terms or "制品业" in joined_terms:
+        return "制造业统计类"
+    if "服务业" in joined_terms or "批发" in joined_terms or "仓储" in joined_terms:
+        return "服务业经营统计类"
+    if "企业" in joined_terms and "投资" in joined_terms:
+        return "企业投资统计类"
+    if any(term in joined_terms for term in ("资金", "金额", "预算", "材料")):
+        return "资金项目材料类"
+    if "项目" in joined_terms and ("案件" in joined_terms or "机构" in joined_terms):
+        return "项目案件信息类"
+    if "城市" in joined_terms or "月月" in joined_terms:
+        return "城市月度指标类"
     labels = {
         "finance": "资金财政类",
         "urgency": "通知时效类",

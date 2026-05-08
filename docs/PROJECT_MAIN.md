@@ -12,7 +12,455 @@
 2. 问题二：将数据集 2 和数据集 3 的后续流入数据归入问题一建立的分类体系，并评价归属判断的合理性、可解释性和迁移适用性。
 3. 问题三：结合归类结果，从紧急程度、错分风险、复核必要性三方面分级，在数据集 4 的资源约束下决定是否人工复核及复核优先顺序。
 
-当前阶段重点：先按最新《多源异构文件数据清洗流程说明文档》完成统一文件画像构建，再在此基础上做问题一建模。
+当前阶段重点：基于 `outputs/b_problem/cleaning_ocr_full/` 的全量 OCR 文件画像，完成问题一历史主题体系；同时将清洗阶段的人工复核标记从“保守质量提示”调整为“数据集 4 资源约束下的复核分配结果”。
+
+## 2026-05-08 本轮接手记录
+
+### 当前问题定义
+
+本轮任务聚焦两个点：
+
+1. 阅读题面与建模手参考，继续完成问题一：对数据集 1 历史真实文件提取内容、结构、业务和质量特征，建立可解释主题分类体系。
+2. 优化清洗日志中 `need_manual_check=6781/7916` 的过度保守问题：依据数据集 4 的资源约束表，重新调整清洗质量评分权重与人工复核分配规则，使自动归档、元数据归档、人工复核数量匹配 S1/S2/S3 场景。
+
+### 已完成内容
+
+- 已读取 `docs/` 下项目交接、算法草图、B 题说明、清洗流程与清洗论文参考文档。
+- 已读取题面 PDF。题目三明确要求重点考虑主题不明确、时效要求高、涉及资金分配的文件，而不是把所有 OCR 或中等质量样本都人工复核。
+- 已读取数据集 4：`S1/S2/S3` 三种资源场景如下：
+
+| 场景 | 每日人工工时 | 自动归档上限 | 人工复核上限 | 按 18 分钟/份折算后复核容量 |
+| --- | ---: | ---: | ---: | ---: |
+| S1 | 60 | 1200 | 200 | 200 |
+| S2 | 80 | 1500 | 300 | 266 |
+| S3 | 100 | 1800 | 400 | 333 |
+
+- 已修改 `src/mcm_b/cleaning.py`：
+  - 新增 `QUALITY_WEIGHTS`，质量评分由文本、OCR、版面、业务信号、格式稳定性五因子构成。
+  - 取消“所有 OCR 文件直接人工复核”的规则，改为仅对 OCR 置信度低、扫描 PDF 待 OCR、超大元数据、文本异常短等硬风险标记。
+  - 对数据集 3 采用更短的文本下限，避免匿名片段因为天然短文本被误判为清洗失败。
+  - 新增 `hard_manual_check`、`manual_review_priority`、`archive_decision`、`resource_scenario` 字段。
+  - 新增资源约束分配：硬风险优先，其余按 `manual_review_priority` 补满各场景复核容量。
+- 已新增 `scripts/recalibrate_cleaning_review.py`，可不重跑 OCR，直接基于现有 `document_index.csv` 重算质量分和复核清单。
+- 已修改 `scripts/run_b_pipeline.py`：
+  - 问题一建模文本只保留中文语义和业务关键词，过滤数字、小数点、英文编码和 Excel 模板词，减少统计表噪声对字符 TF-IDF 的污染。
+  - 问题一主题摘要新增代表文件编号与代表标题。
+  - 主题命名加入基于 top terms 的规则，如地区指标统计、宏观经济统计、文旅活动评价、企业投资统计、服务业经营统计、制造业统计、城市月度指标等。
+- 已修改 `src/mcm_b/modeling.py`：正式 TF-IDF 增加 `min_df=2`、`max_df=0.85`，削弱偶然噪声和过泛词。
+
+### 数据清洗方案
+
+新方案将“清洗质量风险”和“资源约束复核决策”拆成两层：
+
+1. 质量评分：
+
+```text
+Q_i = 0.20 q_text + 0.25 q_ocr + 0.20 q_layout + 0.20 q_business + 0.15 q_format
+```
+
+其中 `q_business` 不再强制要求每个文件都有日期和金额；只有当文件命中截止/资金相关语义时，才把日期/金额缺失作为完整性风险。这样避免把普通通知、统计图、短片段误判为低质量。
+
+2. 复核优先级：
+
+```text
+P_i = 0.45(1-Q_i) + 0.15 OCR风险 + 0.15 短文本风险 + 0.15 业务风险 + 0.10 格式风险
+```
+
+其中业务风险重点包含 `has_money`、`has_deadline`、`has_urgent`、`has_contract`。最终先纳入硬风险文件，再按 `P_i` 从高到低补足 S1/S2/S3 容量。
+
+### 文件结构
+
+本轮新增或更新：
+
+```text
+scripts/
+├── recalibrate_cleaning_review.py  # 不重跑 OCR 的清洗质量/复核清单重校准脚本
+└── run_b_pipeline.py               # 已优化问题一建模文本与主题摘要
+
+src/mcm_b/
+├── cleaning.py                     # 已加入资源感知复核分配
+└── modeling.py                     # 已调整 TF-IDF 过滤参数
+
+outputs/b_problem/cleaning_ocr_full/processed/
+├── manual_check_list.csv           # S1 基准主复核清单，200 份
+├── manual_check_list_S1.csv        # 200 份
+├── manual_check_list_S2.csv        # 266 份
+└── manual_check_list_S3.csv        # 333 份
+
+outputs/b_problem/run_ocr_full/
+├── problem1_topic_summary.csv
+├── problem1_topic_summary.md
+├── problem1_history_topic_assignments.csv
+├── problem1_history_features.csv
+├── topic_model.joblib
+└── RESULT_SUMMARY.md
+```
+
+### 关键算法思路
+
+- 问题一历史主题发现仍采用可解释基线：清洗文本 -> 中文语义过滤 -> 字符级 TF-IDF -> KMeans。
+- 中文语义过滤的目的不是删除业务信息，而是移除 OCR 表格中大量数字、百分号、小数点、Excel 固定模板词，防止聚类按数值格式而非主题聚合。
+- 主题命名采用“模型 top terms + 业务关键词组 + 代表文件”三者结合，避免只依赖关键词组造成误命名。
+- 清洗复核优化采用“硬风险必优先 + 资源容量补足”的策略。硬风险包括扫描 PDF 待 OCR、元数据-only、短文本异常、OCR 置信度低等；资源剩余容量用于抽检高优先级边界样本。
+
+### 已验证结论
+
+- 全量清洗目录已完成资源感知重校准：
+
+```text
+document_count = 7916
+need_manual_check = 200
+hard_manual_check = 90
+auto_archive_count = 6589
+metadata_archive_count = 1127
+```
+
+- S1/S2/S3 复核清单大小：
+
+```text
+S1 = 200
+S2 = 266
+S3 = 333
+```
+
+- 原 `6781` 的人工复核数主要来自旧规则：`parse_quality_between_0.5_and_0.7`、所有 OCR 文件、图片侧车 TXT。新规则确认这些不应全部进入人工复核，图片侧车 TXT 归入 `metadata_archive`。
+- 正式主链路已基于优化后的全量 OCR 清洗产物跑通：
+
+```text
+outputs/b_problem/run_ocr_full/run_summary.json
+problem1_topics = 10
+problem2_classified_records = 4012
+problem2_ambiguous_records = 337
+problem3_manual_review_records = 1229
+scenario_queue_sizes = S1:200, S2:266, S3:333
+```
+
+- 问题一当前 10 类主题输出位于 `outputs/b_problem/run_ocr_full/problem1_topic_summary.md`。当前主题包括地区指标统计、资金项目材料、项目案件信息、宏观经济统计、文旅活动评价、企业投资统计、服务业经营统计、制造业统计、城市月度指标等。
+
+### TODO
+
+- [x] 读取题面与建模手参考，确认三问关系和问题一/三重点。
+- [x] 基于数据集 4 调整清洗质量评分与人工复核分配。
+- [x] 不重跑 OCR，回写 `cleaning_ocr_full` 的优化后复核清单与 summary。
+- [x] 基于 `cleaning_ocr_full` 跑正式主链路，输出 `run_ocr_full`。
+- [x] 优化问题一建模文本，降低数字/模板噪声。
+- [ ] 对问题一主题结果做人工抽样核验，必要时把相近统计类主题合并为更高层主题体系。
+- [ ] 若论文需要更强模型，可在现有 TF-IDF/KMeans 基线外补充 BERT/GCN/AHP-熵权法作为增强方案说明。
+- [ ] 扫描 PDF 转图片 OCR 仍未实现，当前 54 份进入硬风险复核/后续修复队列。
+
+### 参数定义
+
+清洗质量权重：
+
+| 参数 | 当前值 |
+| --- | ---: |
+| `q_text` | 0.20 |
+| `q_ocr` | 0.25 |
+| `q_layout` | 0.20 |
+| `q_business` | 0.20 |
+| `q_format` | 0.15 |
+
+人工复核优先级权重：
+
+| 参数 | 当前值 |
+| --- | ---: |
+| `quality_risk` | 0.45 |
+| `ocr_risk` | 0.15 |
+| `short_text_risk` | 0.15 |
+| `business_risk` | 0.15 |
+| `format_risk` | 0.10 |
+
+资源折算：
+
+```text
+minutes_per_review = 18
+scenario_capacity = min(人工复核能力上限, 每日人工工时 * 60 / 18)
+```
+
+问题一建模参数：
+
+```text
+clusters = 10
+TfidfVectorizer(analyzer="char", ngram_range=(2,4), min_df=2, max_df=0.85, max_features=10000)
+```
+
+### 中间结论
+
+- 旧版 `need_manual_check=6781` 更像“质量提示池”，不适合作为真实人工复核数量。按数据集 4 的每日资源约束，应输出场景化复核队列。
+- 图片 OCR 平均置信度很高，不能仅因 `ocr_used=1` 全量人工复核；只有低置信度、文本异常短或业务高风险 OCR 才优先进入人工池。
+- 图片侧车 TXT 是元数据追踪文件，当前归入 `metadata_archive`，不作为主题文本，也不占用人工复核资源。
+- 问题一主题结果仍受历史数据中大量统计图片影响，当前主题偏向统计指标类、企业投资类、产业类和少量办公材料类；论文中应把这解释为数据集 1 的真实分布特征，并可在后续人工命名阶段合并相近统计主题。
+
+## 2026-05-08 题目一创新实现记录
+
+用户补充说明：`docs/解析.md` 是赛题解析文件，`docs/题目.md` 是原题目文件。后续以这两个 Markdown 为准，不再使用 PDF 轻量抽取文本。
+
+### manual_check_list_S1/S2/S3 含义
+
+`manual_check_list_S1.csv`、`manual_check_list_S2.csv`、`manual_check_list_S3.csv` 分别对应数据集 4 的三种资源约束场景下的人工复核队列：
+
+| 清单 | 对应场景 | 资源解释 | 当前队列规模 |
+| --- | --- | --- | ---: |
+| `manual_check_list.csv` | 默认基准，等同 S1 | 最保守资源配置下最终需要人工复核的文件 | 200 |
+| `manual_check_list_S1.csv` | S1 | 60 小时人工工时、人工复核上限 200 份/天 | 200 |
+| `manual_check_list_S2.csv` | S2 | 80 小时人工工时、人工复核上限 300 份/天，按 18 分钟/份折算为 266 | 266 |
+| `manual_check_list_S3.csv` | S3 | 100 小时人工工时、人工复核上限 400 份/天，按 18 分钟/份折算为 333 | 333 |
+
+三份清单不是不同数据集，而是同一批清洗结果在不同资源强度下的复核队列。所有场景先保留 `hard_manual_check=1` 的硬风险文件，再按 `manual_review_priority` 从高到低补足容量。
+
+### 创新模型实现
+
+根据 `docs/解析.md` 中“文本-单词异构图、PMI、GCN 聚合、c-TF-IDF 主题归纳”的建议，已新增一个可复现的轻量创新实现：
+
+```text
+src/mcm_b/problem1_innovative.py
+scripts/run_problem1_innovative.py
+```
+
+当前环境没有 torch / sentence-transformers，且临时安装 PyMuPDF 失败；因此实现采用“不依赖深度学习框架”的图传播近似方案：
+
+1. 对数据集 1 历史文件构造中文语义文本，过滤数字、英文编码和模板噪声。
+2. 用字符 2-4 gram TF-IDF 构建文档-词边。
+3. 用滑动窗口统计词-词共现，并计算正 PMI，构建词-词图。
+4. 进行两跳图传播：
+
+```text
+X_graph = X_tfidf + 0.60 * X_tfidf * W_ppmi + 0.30 * X_tfidf * W_ppmi^2
+```
+
+5. 拼接结构特征和业务特征：页数、段落数、表格数、图片数、标题数、OCR 置信度、清洗质量、资金/项目/合同/会议/截止/紧急等业务标记。
+6. 使用 SVD 降维 + KMeans 聚类形成问题一类别。
+7. 对每类合并为“类文档”，用 c-TF-IDF 提取主题词，并根据主题词、业务画像、代表文件自动命名。
+
+### 创新模型输出
+
+运行命令：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_problem1_innovative.py --cleaning-dir outputs\b_problem\cleaning_ocr_full --output-dir outputs\b_problem\problem1_innovative --clusters 10 --max-terms 2500
+```
+
+输出目录：
+
+```text
+outputs/b_problem/problem1_innovative/
+├── problem1_graph_metrics.json
+├── problem1_graph_topic_assignments.csv
+├── problem1_graph_topic_summary.csv
+└── problem1_graph_topic_summary.md
+```
+
+已验证输出：
+
+```text
+document_count = 2225
+term_count = 2500
+clusters = 10
+word_graph_edges = 366841
+word_graph_windows = 404135
+silhouette = 0.013804
+calinski_harabasz = 26.407962
+davies_bouldin = 3.981225
+```
+
+当前题目一 10 类主题摘要：
+
+| 主题 | 数量 | 当前名称 |
+| ---: | ---: | --- |
+| 9 | 959 | 项目案件信息类 |
+| 2 | 240 | 资金财政统计类 |
+| 3 | 237 | 生态环境治理类 |
+| 0 | 201 | 文旅活动评价类 |
+| 8 | 166 | 养老服务机构类 |
+| 6 | 131 | 教育教学管理类 |
+| 1 | 118 | 社会民生指标类 |
+| 7 | 114 | 制造业产业统计类 |
+| 4 | 47 | 居民收入统计类 |
+| 5 | 12 | 城市月度指标类 |
+
+### 新的 TODO
+
+- [x] 改用 `docs/解析.md` 和 `docs/题目.md` 作为赛题/解析事实源。
+- [x] 新增异构图 PMI 传播 + 结构业务融合 + c-TF-IDF 的题目一创新模型。
+- [x] 跑通创新模型并输出题目一类别表、分配表和指标表。
+- [x] 新增 `docs/problem1论文描述.md`，汇总题目一算法步骤、数学推导、模型参数、输出解释和论文可誊写表述。
+- [ ] 对 `topic_id=9` 的大类做二级主题拆分，当前 959 份偏大，可能混合了项目、地区、企业统计等子主题。
+- [ ] 为论文补一张“异构图建模流程图”和一张“问题一主题体系表”。
+
+## 2026-05-08 题目二创新实现记录
+
+用户要求开始解决问题二：继续依据 `docs/题目.md` 与 `docs/解析.md`，在题目一最新主题体系上加入创新点、完成代码实现并生成美观输出；论文描述需等用户审核通过后再写。
+
+### 当前问题定义
+
+问题二目标是将数据集 2、数据集 3 的后续流入数据迁移到题目一建立的 10 类历史主题体系中，同时评价：
+
+1. 分类效果：新文件的类别概率、主类别、次类别与归档状态。
+2. 合理性：主类概率与主次类边际差是否支持当前归属。
+3. 可解释性：归属类别的 c-TF-IDF 主题词是否能在新文件中找到贡献证据。
+4. 迁移适用性：数据集 2/3 与历史源域在嵌入空间中的分布差异。
+5. 边界处理：识别多类别重叠样本与无法明确归类样本。
+
+### 已完成内容
+
+已新增代码：
+
+```text
+src/mcm_b/problem2_transfer.py
+scripts/run_problem2_transfer.py
+```
+
+运行命令：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_problem2_transfer.py --cleaning-dir outputs\b_problem\cleaning_ocr_full --output-dir outputs\b_problem\problem2_transfer --clusters 10 --max-terms 2500
+```
+
+输出目录：
+
+```text
+outputs/b_problem/problem2_transfer/
+├── problem2_transfer_classification.csv   # 每条新文件的分类、概率、ARS、MII、TAI、状态和解释词
+├── problem2_dataset_evaluation.csv        # 数据集级评价表
+├── problem2_topic_distribution.csv        # 数据集-主题-状态分布
+├── problem2_boundary_samples.csv          # 多类别重叠/未知样本示例与复核清单
+├── problem2_source_topic_summary.csv      # 源域题目一主题体系
+├── problem2_transfer_report.md            # 可直接审核的 Markdown 汇总报告
+├── problem2_transfer_metrics.json         # 参数与运行指标
+├── problem2_topic_distribution.png        # 主题归属分布图
+├── problem2_topic_distribution_plot_data.csv
+├── problem2_topic_distribution.png.csv
+├── problem2_state_distribution.png        # 自动归档/复核状态分布图
+├── problem2_state_distribution_plot_data.csv
+├── problem2_state_distribution.png.csv
+├── problem2_ars_mii_scatter.png           # 合理性-可解释性散点图
+├── problem2_ars_mii_scatter_plot_data.csv
+└── problem2_ars_mii_scatter.png.csv
+```
+
+其中 `*_plot_data.csv` 是面向论文手的易读作图数据表；`*.png.csv` 是与 PNG 严格同名的作图数据 sidecar。两类表内容一致，均包含中文标签、英文标签和原始数值，方便中文论文重画图。
+
+### 数据清洗与样本筛选
+
+源域仍使用题目一规则：数据集 1 中非图片侧车文件，`parse_quality >= 0.45` 且清洗文本长度不低于 40 的历史文件，共 2225 份。
+
+目标域使用数据集 2、数据集 3 全量记录，共 4519 份。其中：
+
+```text
+target_modelable_count = 4419
+target_unclassifiable_count = 100
+```
+
+不可直接分类样本包括图片侧车元数据、仅元数据、扫描 PDF 待 OCR、有效中文语义过短或解析质量低于迁移阈值的记录，统一进入 `C_unknown_expert_review`。
+
+### 关键算法思路
+
+题目二沿用题目一的异构图主题空间，但增加迁移分类评价层：
+
+1. 源域建模：用数据集 1 训练字符 2-4 gram TF-IDF，构造文档-词边。
+2. 词图传播：用源域滑动窗口计算正 PMI 词-词图，得到两跳传播表示：
+
+```text
+X_graph = X_tfidf + 0.60 * X_tfidf * W_ppmi + 0.30 * X_tfidf * W_ppmi^2
+```
+
+3. 特征融合：拼接结构特征、清洗质量、OCR 置信度、文本长度、文件大小和八类业务标签。
+4. 共享空间：在源域上拟合 Normalizer、SVD、StandardScaler、KMeans，并对目标域复用同一套变换。
+5. 概率化归属：根据目标样本到 10 个主题中心的距离，使用温度 softmax 转为类别概率分布。
+6. 归属合理性 ARS：
+
+```text
+ARS = alpha * p1 + (1 - alpha) * (p1 - p2) / p1
+alpha = 0.60
+```
+
+7. 可解释性 MII：用预测主题的 c-TF-IDF 主题词在目标文本中的命中贡献构造伪注意力分布，再用归一化熵计算解释集中度。
+8. 迁移适用性 TAI：源域与目标域嵌入分布计算 RBF-MMD，再转为：
+
+```text
+TAI = exp(-MMD^2)
+```
+
+9. 边界识别：
+   - `A_clear_auto_archive`：最高概率、ARS、主次类边际差、熵和 MII 均满足清晰归档条件。
+   - `A_assisted_archive`：可归档，但建议保留系统解释或抽检。
+   - `B_overlap_manual_review`：前两类概率接近，属于多类别重叠。
+   - `C_unknown_expert_review`：低概率、低质量、分布外或无法形成稳定迁移表征。
+
+### 参数定义
+
+```text
+n_clusters = 10
+max_terms = 2500
+embedding_dim = 80
+min_model_text_len = 40
+min_model_parse_quality = 0.35
+alpha_ars = 0.60
+probability_temperature_scale = 0.12 * median(source_nearest_center_distance)
+lexical_probability_weight = 0.45
+meta_feature_weight = 1.00
+```
+
+状态阈值：
+
+```text
+A_clear_auto_archive:
+  p1 >= 0.34
+  ARS >= 0.36
+  relative_margin >= 0.18
+  entropy <= 0.88
+  MII >= 0.03
+
+B_overlap_manual_review:
+  relative_margin < 0.10
+  or (p1 < 0.26 and probability_margin < 0.03)
+
+C_unknown_expert_review:
+  p1 < 0.18
+  or entropy > 0.92
+  or parse_quality < 0.35
+```
+
+### 已验证结论
+
+运行结果：
+
+```text
+source_document_count = 2225
+target_document_count = 4519
+target_modelable_count = 4419
+target_unclassifiable_count = 100
+clusters = 10
+term_count = 2500
+embedding_dim = 80
+dataset2_TAI = 0.622962
+dataset3_TAI = 0.590697
+```
+
+数据集级评价：
+
+| 数据集 | 记录数 | 自动/辅助归档 | 清晰自动归档 | 重叠复核 | 未知专家复核 | 平均主类概率 | 平均 ARS | 平均 MII | TAI |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dataset2 | 1001 | 874 | 129 | 16 | 111 | 0.312426 | 0.409915 | 0.243360 | 0.622962 |
+| dataset3 | 3518 | 2449 | 649 | 769 | 300 | 0.306985 | 0.309476 | 0.349149 | 0.590697 |
+
+中间结论：
+
+- 数据集 2 作为半结构化流入数据，迁移适用性和清晰归档比例更高。
+- 用户抽样 `docs/dataset3抽样.md` 显示数据集 3 养老主题并不占主导；初版结果中 dataset3 大量吸附到 `养老服务机构类` 属于模型偏差。
+- 已修正问题二模型：保持问题一源域主题体系不变，新增语义锚定概率校准，过滤“服务/中心/项目/单位”等泛词，并补充教育、养老、生态、制造、文旅、财政等主题锚词。
+- 修正后 dataset3 主题分布不再集中于养老类，主要分布为教育教学管理类 1409、项目案件信息类 673、文旅活动评价类 466、养老服务机构类 439、社会民生指标类 143、资金财政统计类 120、制造业产业统计类 101、城市月度指标类 65、生态环境治理类 62、居民收入统计类 18。
+- 数据集 3 作为匿名真实文件/行记录，边界复核比例显著更高，符合“信息不完整、来源匿名、主题重叠”的题面描述。
+- 新模型没有把所有低置信样本简单丢弃，而是拆分为重叠复核和未知专家研判，方便后续问题三接入错分风险与人工复核优先级。
+
+### TODO
+
+- [x] 完成题目二创新迁移分类模型代码。
+- [x] 输出题目二分类表、评价表、边界样本表、Markdown 报告和三张图。
+- [x] 为每张题目二 PNG 图同步输出中英文作图数据表：`*_plot_data.csv` 与 `*.png.csv`。
+- [x] 验证代码可编译：`python -m compileall src\mcm_b scripts\run_problem2_transfer.py` 通过。
+- [ ] `python -m unittest discover -s tests` 当前无法运行，因为工作区没有可导入的 `tests/` 目录；如需测试，应补建测试目录或运行既有独立测试脚本。
+- [x] 新增 `docs/problem2论文描述.md`，汇总题目二算法步骤、数学推导、模型参数、输出解释和图表解释。
 
 ## 已完成内容
 
@@ -185,10 +633,10 @@ metadata_only: 2
 高优先级：
 
 - [x] 评估并尝试安装 `paddlepaddle-gpu`，将 PaddleOCR 全量清洗从 CPU 切换到 GPU。
-- [ ] 跑完整 PaddleOCR 清洗：输出 `outputs/b_problem/cleaning_ocr_full/`。
-- [ ] 基于 `cleaning_ocr_full` 跑主链路：输出 `outputs/b_problem/run_ocr_full/`。
-- [ ] 检查 OCR 后问题一主题是否比 `run_cleaned_v2` 更合理。
-- [ ] 更新论文可用的清洗统计表和质量控制说明。
+- [x] 跑完整 PaddleOCR 清洗：输出 `outputs/b_problem/cleaning_ocr_full/`。
+- [x] 基于 `cleaning_ocr_full` 跑主链路：输出 `outputs/b_problem/run_ocr_full/`。
+- [x] 检查 OCR 后问题一主题是否比 `run_cleaned_v2` 更合理，并过滤数字/模板噪声重跑。
+- [x] 更新论文可用的清洗统计表和质量控制说明，当前复核数已按数据集 4 重校准。
 
 中优先级：
 
@@ -354,4 +802,7 @@ last commit: d5a07dc feat: add PaddleOCR image cleaning
 2026-05-08: 已创建 `docs/数据清洗环节论文参考说明.md`，作为论文“数据预处理/清洗”部分的完整参考。文档覆盖 19 个章节：清洗目标、输入范围、总体流程、文件扫描编号、类型分流、各类文件清洗细节、OCR 模型与 GPU 环境、文本标准化、业务属性抽取、块级结构、质量评估、输出文件结构、主索引字段、日志解释、全量统计、后续建模衔接、论文表述、局限改进和图表建议。
 2026-05-08: 用户确认数据清洗阶段基本完成，要求整理目录，删除旧版本/临时输出，只保留最新一版文件和数据。清理原则：保留原始 `B题数据集/`、最新全量清洗输出 `outputs/b_problem/cleaning_ocr_full/`、源码、docs、模型配置；删除旧清洗输出、smoke 输出、旧建模输出和临时样本产物。删除前先列目录确认目标。
 2026-05-08: 已列出当前目录：`outputs/b_problem` 中存在旧输出 `cleaning_v1`、`cleaning_v2`、`cleaning_ocr_smoke`、`cleaning_gpu_smoke`、`cleaning_smoke`、`pipeline_*`、`run_*` 以及若干 `sample_*`/`dataset3_head.csv` 临时文件；最新全量清洗结果为 `outputs/b_problem/cleaning_ocr_full`，大小约 `271.02MB`。当前 git 改动为 `docs/PROJECT_MAIN.md`、`src/mcm_b/cleaning.py` 和新增论文参考文档。
+2026-05-08: 本轮接手后新增资源感知复核重校准：运行 `.\.venv\Scripts\python.exe scripts\recalibrate_cleaning_review.py --cleaning-dir outputs\b_problem\cleaning_ocr_full`，将 `need_manual_check` 从旧规则的 6781 调整为 S1 基准 200，硬风险 90，自动归档 6589，元数据归档 1127。
+2026-05-08: 本轮基于优化后的全量 OCR 清洗输出运行 `.\.venv\Scripts\python.exe scripts\run_b_pipeline.py --clusters 10 --cleaning-dir outputs\b_problem\cleaning_ocr_full --output-dir outputs\b_problem\run_ocr_full --max-chars 30000 --max-file-mb 25`，已生成问题一主题体系、问题二归类结果和问题三复核队列。
+2026-05-08: 本轮对问题一建模文本做二次清洗：过滤数字、小数点、英文编码和 Excel 模板词，仅保留中文语义和业务关键词；同时给主题摘要增加代表文件和人工可解释主题命名规则。
 ```

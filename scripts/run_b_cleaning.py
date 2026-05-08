@@ -55,6 +55,9 @@ def main() -> None:
             "ocr_log": "logs/ocr_log.csv",
             "error_log": "logs/error_log.txt",
             "manual_check_list": "processed/manual_check_list.csv",
+            "manual_check_list_S1": "processed/manual_check_list_S1.csv",
+            "manual_check_list_S2": "processed/manual_check_list_S2.csv",
+            "manual_check_list_S3": "processed/manual_check_list_S3.csv",
             "business_dictionary": "processed/business_dictionary.json",
         },
     }
