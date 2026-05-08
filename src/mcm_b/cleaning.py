@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import lru_cache
 import json
+import os
 from pathlib import Path
 import re
 import statistics
@@ -31,6 +32,9 @@ WORD_EXTENSIONS = {".docx"}
 EXCEL_EXTENSIONS = {".xlsx", ".xls", ".csv"}
 PDF_EXTENSIONS = {".pdf"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
+PROJECT_MODEL_ROOT = Path(__file__).resolve().parents[2] / "models" / "paddleocr"
+ASCII_MODEL_ROOT = Path(r"C:\mcm_paddleocr_models")
 
 BUSINESS_DICTIONARY: dict[str, tuple[str, ...]] = {
     "notice": ("通知", "公告", "公示", "安排", "要求"),
@@ -233,11 +237,7 @@ def write_cleaning_outputs(
     _write_business_dictionary(processed / "business_dictionary.json")
     _write_manual_check_list(processed / "manual_check_list.csv", document_index)
     (logs / "error_log.txt").write_text("\n".join(errors), encoding="utf-8")
-    pd.DataFrame(columns=["file_id", "page", "ocr_used", "ocr_confidence", "image_quality", "ocr_text_length", "ocr_error"]).to_csv(
-        logs / "ocr_log.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
+    _write_ocr_log(logs / "ocr_log.csv", document_index)
 
 
 def _scan_file_directory(directory: Path, dataset_id: str, prefix: str) -> list[FileManifestRow]:
@@ -523,19 +523,53 @@ def _parse_image(row: FileManifestRow) -> ParsedContent:
             quality = "high" if width * height >= 800_000 and blur_proxy >= 35 else "medium" if width * height >= 250_000 else "low"
     except Exception as exc:  # noqa: BLE001
         notes.append(f"image_quality_failed:{exc}")
-    text = f"image_width={width}; image_height={height}; image_quality={quality}"
-    block = DocumentBlock(row.file_id, f"{row.file_id}_IMG001", None, "image", text, None, "image_metadata", 1.0, 1)
+    metadata_text = f"image_width={width}; image_height={height}; image_quality={quality}"
+    try:
+        ocr_text, ocr_blocks, avg_confidence = _run_paddleocr_image(path, row.file_id)
+    except Exception as exc:  # noqa: BLE001 - OCR errors must be logged per file.
+        block = DocumentBlock(row.file_id, f"{row.file_id}_IMG001", None, "image", metadata_text, None, "image_metadata", 1.0, 1)
+        return ParsedContent(
+            "image_ocr_failed",
+            0,
+            f"PaddleOCR failed: {type(exc).__name__}: {exc}",
+            "",
+            [block],
+            image_count=1,
+            ocr_used=1,
+            ocr_confidence=0.0,
+            ocr_page_count=1,
+            parse_notes=";".join(notes + [f"image_quality={quality}"]),
+            layout_score=0.25,
+        )
+    blocks = [DocumentBlock(row.file_id, f"{row.file_id}_IMG_META", None, "image", metadata_text, None, "image_metadata", 1.0, 1)]
+    blocks.extend(ocr_blocks)
+    if not ocr_text.strip():
+        return ParsedContent(
+            "image_ocr_empty",
+            0,
+            "PaddleOCR returned no text; manual check required.",
+            "",
+            blocks,
+            image_count=1,
+            ocr_used=1,
+            ocr_confidence=avg_confidence,
+            ocr_page_count=1,
+            parse_notes=";".join(notes + [f"image_quality={quality}"]),
+            layout_score=0.35,
+        )
     return ParsedContent(
-        "image_ocr_pending",
-        0,
-        "OCR engine unavailable; image text requires OCR/manual check.",
+        "image_paddleocr",
+        1,
         "",
-        [block],
+        normalize_text(ocr_text),
+        blocks,
         image_count=1,
-        ocr_used=0,
-        ocr_confidence=0.0,
+        paragraph_count=len(_split_paragraphs(ocr_text)),
+        ocr_used=1,
+        ocr_confidence=avg_confidence,
+        ocr_page_count=1,
         parse_notes=";".join(notes + [f"image_quality={quality}"]),
-        layout_score=0.2,
+        layout_score=0.55,
     )
 
 
@@ -761,6 +795,114 @@ def _write_business_dictionary(path: Path) -> None:
 def _write_manual_check_list(path: Path, document_index: pd.DataFrame) -> None:
     columns = ["file_id", "dataset_id", "file_name", "file_type", "parse_quality", "manual_check_reason", "file_path"]
     document_index[document_index["need_manual_check"] == 1][columns].to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def _write_ocr_log(path: Path, document_index: pd.DataFrame) -> None:
+    rows: list[dict[str, object]] = []
+    ocr_frame = document_index[document_index["ocr_used"] == 1].copy()
+    for _, row in ocr_frame.iterrows():
+        rows.append(
+            {
+                "file_id": row["file_id"],
+                "page": 1 if int(row.get("ocr_page_count", 0) or 0) else "",
+                "ocr_used": row["ocr_used"],
+                "ocr_confidence": row["ocr_confidence"],
+                "image_quality": _parse_note_value(str(row.get("parse_notes", "")), "image_quality"),
+                "ocr_text_length": row["text_length"],
+                "ocr_error": row["error_message"] if int(row.get("parse_success", 0)) == 0 else "",
+            }
+        )
+    pd.DataFrame(
+        rows,
+        columns=["file_id", "page", "ocr_used", "ocr_confidence", "image_quality", "ocr_text_length", "ocr_error"],
+    ).to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def _parse_note_value(notes: str, key: str) -> str:
+    for part in notes.split(";"):
+        if part.startswith(f"{key}="):
+            return part.split("=", 1)[1]
+    return ""
+
+
+@lru_cache(maxsize=1)
+def _paddleocr_engine():
+    det_dir, rec_dir = _resolve_paddleocr_model_dirs()
+    from paddleocr import PaddleOCR
+
+    return PaddleOCR(
+        text_detection_model_dir=str(det_dir),
+        text_recognition_model_dir=str(rec_dir),
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=False,
+        enable_mkldnn=False,
+    )
+
+
+def _resolve_paddleocr_model_dirs() -> tuple[Path, Path]:
+    env_det = os.environ.get("PADDLEOCR_DET_DIR")
+    env_rec = os.environ.get("PADDLEOCR_REC_DIR")
+    if env_det and env_rec:
+        return Path(env_det), Path(env_rec)
+
+    ascii_det = ASCII_MODEL_ROOT / "det" / "PP-OCRv5_server_det_infer"
+    ascii_rec = ASCII_MODEL_ROOT / "rec" / "PP-OCRv5_server_rec_infer"
+    if _is_valid_paddle_model_dir(ascii_det) and _is_valid_paddle_model_dir(ascii_rec):
+        return ascii_det, ascii_rec
+
+    project_det = PROJECT_MODEL_ROOT / "det" / "PP-OCRv5_server_det_infer"
+    project_rec = PROJECT_MODEL_ROOT / "rec" / "PP-OCRv5_server_rec_infer"
+    if _is_valid_paddle_model_dir(project_det) and _is_valid_paddle_model_dir(project_rec):
+        return project_det, project_rec
+
+    raise FileNotFoundError(
+        "PaddleOCR PP-OCRv5 model dirs not found. Set PADDLEOCR_DET_DIR and PADDLEOCR_REC_DIR, "
+        "or place models under models/paddleocr/{det,rec}."
+    )
+
+
+def _is_valid_paddle_model_dir(path: Path) -> bool:
+    return (path / "inference.json").exists() and (path / "inference.pdiparams").exists() and (path / "inference.yml").exists()
+
+
+def _run_paddleocr_image(path: Path, file_id: str) -> tuple[str, list[DocumentBlock], float]:
+    engine = _paddleocr_engine()
+    result = engine.predict(str(path))
+    item = result[0] if isinstance(result, list) and result else result
+    data = item if isinstance(item, dict) else item.to_dict()
+    texts = [str(text) for text in (data.get("rec_texts") or [])]
+    scores = [float(score) for score in (data.get("rec_scores") or [])]
+    polys = data.get("rec_polys") or data.get("dt_polys") or []
+    blocks: list[DocumentBlock] = []
+    for index, text in enumerate(texts, start=1):
+        confidence = scores[index - 1] if index - 1 < len(scores) else 0.0
+        bbox = _poly_to_bbox(polys[index - 1]) if index - 1 < len(polys) else None
+        blocks.append(
+            DocumentBlock(
+                file_id=file_id,
+                block_id=f"{file_id}_OCR{index:04d}",
+                page=1,
+                block_type="image_text",
+                text=text,
+                bbox=bbox,
+                source="paddleocr",
+                confidence=round(confidence, 6),
+                reading_order=index + 1,
+            )
+        )
+    avg_confidence = round(sum(scores) / len(scores), 6) if scores else 0.0
+    return "\n".join(texts), blocks, avg_confidence
+
+
+def _poly_to_bbox(poly: object) -> list[float] | None:
+    try:
+        points = poly.tolist() if hasattr(poly, "tolist") else poly
+        xs = [float(point[0]) for point in points]
+        ys = [float(point[1]) for point in points]
+        return [min(xs), min(ys), max(xs), max(ys)]
+    except Exception:
+        return None
 
 
 def _read_txt(path: Path) -> tuple[str, str]:

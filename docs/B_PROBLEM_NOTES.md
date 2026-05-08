@@ -50,3 +50,10 @@ B 题是“智能办公场景下多源异构文件识别与治理优化”。需
 ```
 
 清洗脚本按最新流程文档输出 `file_manifest.csv`、`document_index.csv`、`document_blocks.jsonl`、`parse_log.csv`、`ocr_log.csv`、`error_log.txt`、`business_dictionary.json` 和 `manual_check_list.csv`。主链路不再直接从原文件抽文本，而是基于 `document_index.csv` 构建问题一的历史主题体系。
+
+PaddleOCR 接入说明：
+
+- 使用 PP-OCRv5 server det/rec 本地模型。
+- 当前 Windows + 中文路径下，Paddle 推理读取项目内模型会失败；代码优先使用 `C:\mcm_paddleocr_models` 下的 ASCII 路径模型。
+- CPU 推理需设置 `enable_mkldnn=False`，否则 PP-OCRv5 在当前 PaddlePaddle 3.3.1 环境下会触发 oneDNN/PIR 兼容问题。
+- OCR 输出会写入 `document_blocks.jsonl` 的 `image_text` 块，以及 `logs/ocr_log.csv`。

@@ -72,6 +72,28 @@ docs/多源异构文件数据清洗流程说明文档.md
 outputs/b_problem/cleaning_v2/
 ```
 
+PaddleOCR 已接入清洗流程。由于 Paddle 在当前中文项目路径下读取本地模型会失败，已验证可用的模型镜像路径为：
+
+```text
+C:\mcm_paddleocr_models\det\PP-OCRv5_server_det_infer
+C:\mcm_paddleocr_models\rec\PP-OCRv5_server_rec_infer
+```
+
+代码默认优先读取该 ASCII 路径；也可用环境变量覆盖：
+
+```powershell
+$env:PADDLEOCR_DET_DIR='C:\mcm_paddleocr_models\det\PP-OCRv5_server_det_infer'
+$env:PADDLEOCR_REC_DIR='C:\mcm_paddleocr_models\rec\PP-OCRv5_server_rec_infer'
+```
+
+OCR 小样本验证结果在：
+
+```text
+outputs/b_problem/cleaning_ocr_smoke/
+```
+
+其中 `logs/parse_log.csv` 可看到 `image_paddleocr`，`logs/ocr_log.csv` 可看到 `ocr_confidence` 和 `ocr_text_length`。
+
 当前正式建模结果在：
 
 ```text

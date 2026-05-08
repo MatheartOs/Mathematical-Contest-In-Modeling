@@ -15,3 +15,5 @@ data/processed/
 B题数据集/
 outputs/*
 !outputs/.gitkeep
+models/
+PP-OCRv5/
