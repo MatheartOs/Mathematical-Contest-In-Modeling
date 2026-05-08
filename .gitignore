@@ -1,6 +1,8 @@
 .venv/
 __pycache__/
 *.py[cod]
+README.md
+CLAUDE.md
 
 .ipynb_checkpoints/
 .pytest_cache/
@@ -10,7 +12,6 @@ __pycache__/
 .env
 .env.*
 
-data/raw/
-data/processed/
+/data/
 outputs/*
 !outputs/.gitkeep
