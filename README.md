@@ -110,10 +110,11 @@ Dominant eigenvalue estimate: 14.07347775
 项目内放置完整 `B题数据集/` 后，可运行正式链路：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_b_pipeline.py --clusters 10 --max-chars 12000 --max-file-mb 25 --output-dir outputs\b_problem\run_filtered
+.\.venv\Scripts\python.exe scripts\run_b_cleaning.py --output-dir outputs\b_problem\cleaning_v2
+.\.venv\Scripts\python.exe scripts\run_b_pipeline.py --clusters 10 --max-chars 30000 --max-file-mb 25 --cleaning-dir outputs\b_problem\cleaning_v2 --output-dir outputs\b_problem\run_cleaned_v2
 ```
 
-正式链路会生成 `RESULT_SUMMARY.md`、问题 1/2/3 的 CSV 表和 PNG 图；`B题数据集/` 与 `outputs/` 均不提交到 git。
+清洗链路会生成 `document_index.csv`、`document_blocks.jsonl`、`parse_log.csv`、`manual_check_list.csv` 等标准清洗产物。正式链路会基于 `document_index.csv` 生成 `RESULT_SUMMARY.md`、问题 1/2/3 的 CSV 表和 PNG 图；`B题数据集/` 与 `outputs/` 均不提交到 git。
 
 交接和协作说明见：
 

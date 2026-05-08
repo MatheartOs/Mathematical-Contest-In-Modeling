@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mcm_b.features import build_feature_frame
 from mcm_b.readers import DocumentRecord, read_document
+from mcm_b.cleaning import business_flags, extract_amounts, extract_dates, normalize_text
 
 
 class BReaderTests(unittest.TestCase):
@@ -36,6 +37,15 @@ class BReaderTests(unittest.TestCase):
 
         self.assertGreater(frame.loc[0, "kw_urgency"], 0)
         self.assertGreater(frame.loc[0, "kw_finance"], 0)
+
+    def test_cleaning_extracts_business_fields(self) -> None:
+        text = normalize_text("请于2026年5月20日前提交项目经费预算3.5万元。")
+        flags, _ = business_flags(text)
+
+        self.assertIn("2026-05-20", extract_dates(text))
+        self.assertIn(35000.0, extract_amounts(text))
+        self.assertEqual(flags["has_deadline"], 1)
+        self.assertEqual(flags["has_money"], 1)
 
 
 if __name__ == "__main__":

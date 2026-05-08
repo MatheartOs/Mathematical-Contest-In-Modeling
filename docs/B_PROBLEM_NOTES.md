@@ -45,7 +45,8 @@ B 题是“智能办公场景下多源异构文件识别与治理优化”。需
 当前已提供正式链路：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_b_pipeline.py --clusters 10 --max-chars 12000 --max-file-mb 25 --output-dir outputs\b_problem\run_filtered
+.\.venv\Scripts\python.exe scripts\run_b_cleaning.py --output-dir outputs\b_problem\cleaning_v2
+.\.venv\Scripts\python.exe scripts\run_b_pipeline.py --clusters 10 --max-chars 30000 --max-file-mb 25 --cleaning-dir outputs\b_problem\cleaning_v2 --output-dir outputs\b_problem\run_cleaned_v2
 ```
 
-该脚本会缓存抽取结果，并跳过超过 `--max-file-mb` 的全文解析，只保留元数据。
+清洗脚本按最新流程文档输出 `file_manifest.csv`、`document_index.csv`、`document_blocks.jsonl`、`parse_log.csv`、`ocr_log.csv`、`error_log.txt`、`business_dictionary.json` 和 `manual_check_list.csv`。主链路不再直接从原文件抽文本，而是基于 `document_index.csv` 构建问题一的历史主题体系。

@@ -46,37 +46,53 @@ git fetch origin
 | --- | --- |
 | `src/mcm_b/paths.py` | 数据路径和输出路径配置，可用 `MCM_B_DATA_ROOT` 覆盖 |
 | `src/mcm_b/readers.py` | 异构文件轻量读取，统一输出 `DocumentRecord` |
+| `src/mcm_b/cleaning.py` | 按最新清洗流程文档生成文件画像、内容块、日志和人工检查表 |
 | `src/mcm_b/features.py` | 可解释文本与文件特征 |
 | `src/mcm_b/modeling.py` | TF-IDF + KMeans 主题发现与迁移分类 |
 | `src/mcm_b/risk.py` | 人工复核优先级与资源场景队列 |
 | `scripts/inspect_b_data.py` | 数据结构和读取器小样本验证 |
 | `scripts/run_b_pipeline_sample.py` | 端到端小样本基线 |
 | `scripts/run_b_pipeline.py` | 带缓存的正式问题链路，输出题目结果表和图 |
+| `scripts/run_b_cleaning.py` | 单独运行标准数据清洗流程 |
 | `outputs/b_problem/` | 运行输出，不入库 |
 
 ## Current Full Run
 
 用户已将完整数据放到项目根目录 `B题数据集/`。路径配置现在优先读取项目内数据，找不到时才回退到平级中文目录。
 
-本轮正式结果在：
+最新清洗规范来自：
 
 ```text
-outputs/b_problem/run_filtered/
+docs/多源异构文件数据清洗流程说明文档.md
+```
+
+当前正式清洗结果在：
+
+```text
+outputs/b_problem/cleaning_v2/
+```
+
+当前正式建模结果在：
+
+```text
+outputs/b_problem/run_cleaned_v2/
 ```
 
 运行命令：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_b_pipeline.py --clusters 10 --max-chars 12000 --max-file-mb 25 --output-dir outputs\b_problem\run_filtered
+.\.venv\Scripts\python.exe scripts\run_b_pipeline.py --clusters 10 --max-chars 30000 --max-file-mb 25 --cleaning-dir outputs\b_problem\cleaning_v2 --output-dir outputs\b_problem\run_cleaned_v2 --force-cleaning
 ```
 
 关键结果：
 
-- 数据集 1：3396 条，参与历史主题建模的可用文本 286 条。图片和“图片名称/下载URL”类低内容元数据不参与主题建模。
+- 清洗总文档：7916 条，其中 dataset1=3396、dataset2=1001、dataset3=3518、dataset4=1。
+- 清洗分流：图片 OCR 待处理 1990 条，图片侧车 TXT 1127 条，docx 617 条，普通 txt 351 条，excel 176 条，text PDF 76 条。
+- 数据集 1：图片和“图片名称/图片编号/下载URL”类侧车文本已保留在清洗索引和块表中，但不进入问题一主题建模。
 - 数据集 2：1001 条，可归类文本 923 条。
 - 数据集 3：3518 条。
-- 新数据归类总数：4441 条。
-- 模糊/需复核候选：2010/2011 条。
+- 新数据归类总数：4425 条。
+- 模糊/需复核候选：2784/3614 条。
 - S1/S2/S3 复核队列大小：200/266/333。
 
 ## Important Caution

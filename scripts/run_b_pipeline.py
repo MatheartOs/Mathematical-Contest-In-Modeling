@@ -1,18 +1,4 @@
-"""Run the B problem implementation chain and produce compact results.
-
-The script is intended as the main reproducible pipeline:
-
-1. extract/cache bounded text and metadata from datasets 1 and 2;
-2. load all dataset 3 text fragments;
-3. build the historical topic system from dataset 1;
-4. transfer-classify datasets 2 and 3;
-5. score manual-review priority under dataset 4 scenarios;
-6. write CSV/Markdown summaries and PNG charts.
-
-Large files are included as metadata-only records by default. This protects the
-contest machine from accidental multi-hour parsing while keeping the file IDs
-visible in result tables.
-"""
+"""Run the B problem chain from the standardized cleaning deliverables."""
 
 from __future__ import annotations
 
@@ -27,29 +13,25 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from mcm_b.features import KEYWORD_GROUPS, build_feature_frame
+from mcm_b.cleaning import clean_all_documents, write_cleaning_outputs
+from mcm_b.features import KEYWORD_GROUPS
 from mcm_b.modeling import classify_records, fit_topic_model, save_topic_model
-from mcm_b.paths import DATASET1_DIR, DATASET2_DIR, DATASET3_XLSX, DATASET4_XLSX, DATA_ROOT, ensure_output_root
-from mcm_b.readers import (
-    DocumentRecord,
-    load_records_jsonl,
-    make_metadata_only_record,
-    read_document,
-    save_records_jsonl,
-)
+from mcm_b.paths import DATASET4_XLSX, DATA_ROOT, ensure_output_root
+from mcm_b.readers import DocumentRecord
 from mcm_b.risk import allocate_reviews_by_scenario, load_resource_scenarios, score_review_priority
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, default=ensure_output_root() / "run_full")
+    parser.add_argument("--cleaning-dir", type=Path, default=ensure_output_root() / "cleaning_v1")
     parser.add_argument("--max-chars", type=int, default=12_000)
-    parser.add_argument("--max-file-mb", type=float, default=25.0)
+    parser.add_argument("--max-file-mb", type=float, default=50.0)
     parser.add_argument("--clusters", type=int, default=10)
-    parser.add_argument("--history-limit", type=int, default=0, help="0 means no limit.")
-    parser.add_argument("--new-file-limit", type=int, default=0, help="0 means no limit.")
+    parser.add_argument("--dataset1-limit", type=int, default=0, help="0 means no limit.")
+    parser.add_argument("--dataset2-limit", type=int, default=0, help="0 means no limit.")
     parser.add_argument("--dataset3-limit", type=int, default=0, help="0 means no limit.")
-    parser.add_argument("--force-cache", action="store_true")
+    parser.add_argument("--force-cleaning", action="store_true")
     return parser.parse_args()
 
 
@@ -57,41 +39,22 @@ def main() -> None:
     args = parse_args()
     started = perf_counter()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    document_index = _load_or_run_cleaning(args)
+    model_frame = _build_model_frame(document_index)
 
-    history_records = _load_or_extract_file_dataset(
-        DATASET1_DIR,
-        dataset="dataset1",
-        cache_path=args.output_dir / "cache_dataset1.jsonl",
-        limit=args.history_limit,
-        max_chars=args.max_chars,
-        max_file_mb=args.max_file_mb,
-        force_cache=args.force_cache,
-    )
-    new_file_records = _load_or_extract_file_dataset(
-        DATASET2_DIR,
-        dataset="dataset2",
-        cache_path=args.output_dir / "cache_dataset2.jsonl",
-        limit=args.new_file_limit,
-        max_chars=args.max_chars,
-        max_file_mb=args.max_file_mb,
-        force_cache=args.force_cache,
-    )
-    dataset3_records = _load_dataset3_records(args.dataset3_limit, args.max_chars)
-
-    history_features = build_feature_frame(history_records)
-    new_records = new_file_records + dataset3_records
-    new_features = build_feature_frame(new_records)
-
-    usable_history = _usable_text_records(history_records)
+    history_features = model_frame[model_frame["dataset"] == "dataset1"].copy()
+    new_features = model_frame[model_frame["dataset"].isin(["dataset2", "dataset3"])].copy()
+    usable_history = _records_from_frame(history_features)
     if len(usable_history) < args.clusters:
         raise RuntimeError(f"Only {len(usable_history)} usable history records; cannot fit {args.clusters} clusters.")
 
     topic_model = fit_topic_model(usable_history, n_clusters=args.clusters)
-    classified = classify_records(topic_model, _usable_text_records(new_records))
+    classified = classify_records(topic_model, _records_from_frame(new_features))
     priority = score_review_priority(classified, new_features)
     scenarios = load_resource_scenarios(DATASET4_XLSX)
     queues = allocate_reviews_by_scenario(priority, scenarios)
 
+    document_index.to_csv(args.output_dir / "document_index_used.csv", index=False, encoding="utf-8-sig")
     _write_tables(args.output_dir, history_features, new_features, topic_model.assignments, classified, priority, queues)
     _write_keyword_theme_tables(args.output_dir, history_features, new_features)
     topic_summary = _build_topic_summary(topic_model.assignments, topic_model.topic_terms, history_features)
@@ -103,9 +66,7 @@ def main() -> None:
 
     run_summary = _build_run_summary(
         args=args,
-        history_records=history_records,
-        new_file_records=new_file_records,
-        dataset3_records=dataset3_records,
+        document_index=document_index,
         topic_summary=topic_summary,
         classified=classified,
         priority=priority,
@@ -123,84 +84,94 @@ def main() -> None:
     print(json.dumps(run_summary, ensure_ascii=False, indent=2))
 
 
-def _load_or_extract_file_dataset(
-    directory: Path,
-    dataset: str,
-    cache_path: Path,
-    limit: int,
-    max_chars: int,
-    max_file_mb: float,
-    force_cache: bool,
-) -> list[DocumentRecord]:
-    if cache_path.exists() and not force_cache:
-        return load_records_jsonl(cache_path)
+def _load_or_run_cleaning(args: argparse.Namespace) -> pd.DataFrame:
+    index_path = args.cleaning_dir / "processed" / "document_index.csv"
+    if index_path.exists() and not args.force_cleaning:
+        return pd.read_csv(index_path)
+    limits = {
+        "dataset1": args.dataset1_limit,
+        "dataset2": args.dataset2_limit,
+        "dataset3": args.dataset3_limit,
+    }
+    limits = {key: value for key, value in limits.items() if value}
+    document_index, blocks, manifest, parse_log, errors = clean_all_documents(
+        max_chars=args.max_chars,
+        max_file_mb=args.max_file_mb,
+        limits=limits,
+    )
+    write_cleaning_outputs(args.cleaning_dir, document_index, blocks, manifest, parse_log, errors)
+    return document_index
 
-    files = sorted(path for path in directory.iterdir() if path.is_file())
-    if limit:
-        files = files[:limit]
 
+def _build_model_frame(document_index: pd.DataFrame) -> pd.DataFrame:
+    frame = document_index.copy()
+    frame = frame[frame["dataset_id"].isin(["dataset1", "dataset2", "dataset3"])].copy()
+    frame["doc_id"] = frame["file_id"]
+    frame["dataset"] = frame["dataset_id"]
+    frame["path"] = frame["file_path"]
+    frame["extension"] = frame["file_type"]
+    frame["text"] = (
+        frame["title"].fillna("")
+        + "\n"
+        + frame["clean_text"].fillna("")
+        + "\n关键词:"
+        + frame["business_keywords"].fillna("")
+    )
+    frame["status"] = frame["parse_success"].map(lambda value: "ok" if int(value) == 1 else "cleaning_low_quality")
+    frame["size_bytes"] = (frame["file_size_kb"].fillna(0).astype(float) * 1024).astype(int)
+    frame["text_length"] = frame["clean_text"].fillna("").map(len)
+    frame["text_quality"] = frame["parse_quality"].fillna(0)
+    frame["log_size_bytes"] = 0.0
+    frame["line_count"] = frame["clean_text"].fillna("").map(lambda text: str(text).count("\n") + 1 if text else 0)
+    _add_keyword_columns(frame)
+    frame["keyword_total"] = frame[[f"kw_{key}" for key in KEYWORD_GROUPS]].sum(axis=1)
+    frame["dominant_keyword_group"] = frame.apply(_dominant_keyword_group, axis=1)
+    return frame
+
+
+def _records_from_frame(frame: pd.DataFrame) -> list[DocumentRecord]:
     records: list[DocumentRecord] = []
-    max_bytes = int(max_file_mb * 1024 * 1024)
-    for index, path in enumerate(files, start=1):
-        size = path.stat().st_size
-        if size > max_bytes:
-            record = make_metadata_only_record(
-                path,
-                dataset=dataset,
-                status="skipped_large",
-                warning=f"Skipped text extraction because file exceeds {max_file_mb} MB.",
-            )
-        else:
-            record = read_document(path, dataset=dataset, max_chars=max_chars)
-        records.append(record)
-        if index % 250 == 0:
-            print(f"[{dataset}] extracted {index}/{len(files)}")
-
-    save_records_jsonl(records, cache_path)
-    return records
-
-
-def _load_dataset3_records(limit: int, max_chars: int) -> list[DocumentRecord]:
-    nrows = limit if limit else None
-    frame = pd.read_excel(DATASET3_XLSX, nrows=nrows)
-    records: list[DocumentRecord] = []
-    for _, row in frame.iterrows():
-        doc_id = str(row.get("文件编号", ""))
-        text = "" if pd.isna(row.get("正文片段", "")) else str(row.get("正文片段", ""))[:max_chars]
-        time_info = "" if pd.isna(row.get("时间信息", "")) else str(row.get("时间信息", ""))
+    usable = frame[(frame["text"].fillna("").str.len() >= 80) & (frame["parse_quality"].fillna(0) >= 0.45)].copy()
+    for _, row in usable.iterrows():
         records.append(
             DocumentRecord(
-                doc_id=doc_id,
-                path=f"{DATASET3_XLSX}#{doc_id}",
-                dataset="dataset3",
-                extension=".xlsx-row",
-                size_bytes=len(text.encode("utf-8")),
-                text=text,
-                status="ok",
-                metadata={"time_info": time_info},
+                doc_id=str(row["doc_id"]),
+                path=str(row["path"]),
+                dataset=str(row["dataset"]),
+                extension=str(row["extension"]),
+                size_bytes=int(row.get("size_bytes", 0)),
+                text=str(row["text"]),
+                status=str(row.get("status", "ok")),
+                metadata={"parse_quality": float(row.get("parse_quality", 0))},
             )
         )
     return records
 
 
-def _usable_text_records(records: list[DocumentRecord]) -> list[DocumentRecord]:
-    return [
-        record
-        for record in records
-        if record.status in {"ok", "pdf_no_text"} and len((record.text or "").strip()) >= 40
-        and not _is_low_content_metadata(record)
-    ]
+def _add_keyword_columns(frame: pd.DataFrame) -> None:
+    for group in KEYWORD_GROUPS:
+        source = {
+            "finance": "has_money",
+            "urgency": "has_urgent",
+            "policy": "has_notice",
+            "education": None,
+            "technology": "has_project",
+            "government": "has_meeting",
+            "health": None,
+            "environment": None,
+            "personnel": "has_personnel",
+            "legal": "has_contract",
+        }.get(group)
+        if source and source in frame:
+            frame[f"kw_{group}"] = frame[source].fillna(0).astype(int)
+        else:
+            frame[f"kw_{group}"] = frame["clean_text"].fillna("").map(lambda text: sum(str(text).count(term) for term in KEYWORD_GROUPS[group]))
 
 
-def _is_low_content_metadata(record: DocumentRecord) -> bool:
-    text = (record.text or "").lstrip()
-    image_name = "\u56fe\u7247\u540d\u79f0:"
-    download_url = "\u4e0b\u8f7dURL:"
-    if text.startswith(image_name) and download_url in text[:500]:
-        return True
-    if record.extension in {".jpg", ".jpeg", ".png"}:
-        return True
-    return False
+def _dominant_keyword_group(row: pd.Series) -> str:
+    scores = {group: row.get(f"kw_{group}", 0) for group in KEYWORD_GROUPS}
+    group, score = max(scores.items(), key=lambda item: item[1])
+    return group if score else "unknown"
 
 
 def _write_tables(
@@ -279,9 +250,7 @@ def _suggest_label(keyword_group: str, terms: list[str]) -> str:
 
 def _build_run_summary(
     args: argparse.Namespace,
-    history_records: list[DocumentRecord],
-    new_file_records: list[DocumentRecord],
-    dataset3_records: list[DocumentRecord],
+    document_index: pd.DataFrame,
     topic_summary: pd.DataFrame,
     classified: pd.DataFrame,
     priority: pd.DataFrame,
@@ -297,16 +266,13 @@ def _build_run_summary(
         },
         "elapsed_seconds": round(elapsed_seconds, 3),
         "dataset_counts": {
-            "dataset1_records": len(history_records),
-            "dataset1_usable_text": len(_usable_text_records(history_records)),
-            "dataset2_records": len(new_file_records),
-            "dataset2_usable_text": len(_usable_text_records(new_file_records)),
-            "dataset3_records": len(dataset3_records),
+            "dataset1_records": int((document_index["dataset_id"] == "dataset1").sum()),
+            "dataset2_records": int((document_index["dataset_id"] == "dataset2").sum()),
+            "dataset3_records": int((document_index["dataset_id"] == "dataset3").sum()),
         },
         "status_counts": {
-            "dataset1": _status_counts(history_records),
-            "dataset2": _status_counts(new_file_records),
-            "dataset3": _status_counts(dataset3_records),
+            "parse_success": document_index["parse_success"].value_counts().to_dict(),
+            "manual_check": document_index["need_manual_check"].value_counts().to_dict(),
         },
         "problem1_topics": len(topic_summary),
         "problem2_classified_records": len(classified),
@@ -326,11 +292,6 @@ def _build_run_summary(
             ],
         },
     }
-
-
-def _status_counts(records: list[DocumentRecord]) -> dict[str, int]:
-    frame = pd.DataFrame({"status": [record.status for record in records]})
-    return frame["status"].value_counts().to_dict()
 
 
 def _write_markdown_report(output_dir: Path, summary: dict[str, object], topic_summary: pd.DataFrame, priority: pd.DataFrame) -> None:
