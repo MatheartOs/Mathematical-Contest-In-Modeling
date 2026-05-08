@@ -110,7 +110,6 @@ def classify_records(result: TopicModelResult, records: list[DocumentRecord]) ->
     matrix = result.vectorizer.transform([record.text for record in usable_records])
     distances = euclidean_distances(matrix, result.model.cluster_centers_)
     labels = np.argmin(distances, axis=1)
-    confidence = _distance_confidence(distances)
     sorted_distances = np.sort(distances, axis=1)
     margins = (
         sorted_distances[:, 1] - sorted_distances[:, 0]
@@ -118,6 +117,7 @@ def classify_records(result: TopicModelResult, records: list[DocumentRecord]) ->
         else np.ones(distances.shape[0])
     )
     margin_confidence = margins / (sorted_distances[:, 1] + 1e-9) if distances.shape[1] > 1 else margins
+    confidence = _distance_confidence(distances, margin_confidence)
 
     for index, record in enumerate(usable_records):
         rows.append(
@@ -129,7 +129,7 @@ def classify_records(result: TopicModelResult, records: list[DocumentRecord]) ->
                 "predicted_topic_id": int(labels[index]),
                 "classification_confidence": round(float(confidence[index]), 6),
                 "topic_margin": round(float(margin_confidence[index]), 6),
-                "is_ambiguous": bool(confidence[index] < 0.45 or margin_confidence[index] < 0.12),
+                "is_ambiguous": bool(confidence[index] < 0.35 or margin_confidence[index] < 0.015),
             }
         )
     return pd.DataFrame(rows)
@@ -157,14 +157,8 @@ def _top_terms(vectorizer: TfidfVectorizer, model: KMeans, top_n: int) -> dict[i
     return topic_terms
 
 
-def _distance_confidence(distances: np.ndarray) -> np.ndarray:
+def _distance_confidence(distances: np.ndarray, margin_confidence: np.ndarray) -> np.ndarray:
     if distances.shape[1] == 1:
         return np.ones(distances.shape[0])
-    scale = np.std(distances, axis=1, keepdims=True)
-    scale[scale == 0] = 1.0
-    logits = -distances / scale
-    logits = logits - logits.max(axis=1, keepdims=True)
-    probs = np.exp(logits)
-    probs = probs / probs.sum(axis=1, keepdims=True)
-    confidence = probs.max(axis=1)
+    confidence = np.sqrt(np.clip(margin_confidence / 0.12, 0.0, 1.0))
     return np.array([0.0 if math.isnan(value) else value for value in confidence])

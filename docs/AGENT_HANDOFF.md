@@ -51,7 +51,33 @@ git fetch origin
 | `src/mcm_b/risk.py` | 人工复核优先级与资源场景队列 |
 | `scripts/inspect_b_data.py` | 数据结构和读取器小样本验证 |
 | `scripts/run_b_pipeline_sample.py` | 端到端小样本基线 |
+| `scripts/run_b_pipeline.py` | 带缓存的正式问题链路，输出题目结果表和图 |
 | `outputs/b_problem/` | 运行输出，不入库 |
+
+## Current Full Run
+
+用户已将完整数据放到项目根目录 `B题数据集/`。路径配置现在优先读取项目内数据，找不到时才回退到平级中文目录。
+
+本轮正式结果在：
+
+```text
+outputs/b_problem/run_filtered/
+```
+
+运行命令：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_b_pipeline.py --clusters 10 --max-chars 12000 --max-file-mb 25 --output-dir outputs\b_problem\run_filtered
+```
+
+关键结果：
+
+- 数据集 1：3396 条，参与历史主题建模的可用文本 286 条。图片和“图片名称/下载URL”类低内容元数据不参与主题建模。
+- 数据集 2：1001 条，可归类文本 923 条。
+- 数据集 3：3518 条。
+- 新数据归类总数：4441 条。
+- 模糊/需复核候选：2010/2011 条。
+- S1/S2/S3 复核队列大小：200/266/333。
 
 ## Important Caution
 

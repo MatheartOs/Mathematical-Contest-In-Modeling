@@ -12,5 +12,6 @@ __pycache__/
 
 data/raw/
 data/processed/
+B题数据集/
 outputs/*
 !outputs/.gitkeep

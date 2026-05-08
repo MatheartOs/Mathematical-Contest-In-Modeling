@@ -10,7 +10,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTEST_ROOT = REPO_ROOT.parent
 
 DEFAULT_DATA_ROOT = CONTEST_ROOT / "数模赛数据" / "B题数据集"
-DATA_ROOT = Path(os.environ.get("MCM_B_DATA_ROOT", DEFAULT_DATA_ROOT)).resolve()
+LOCAL_DATA_ROOT = REPO_ROOT / "B题数据集"
+
+DATA_ROOT = Path(
+    os.environ.get(
+        "MCM_B_DATA_ROOT",
+        LOCAL_DATA_ROOT if LOCAL_DATA_ROOT.exists() else DEFAULT_DATA_ROOT,
+    )
+).resolve()
 
 DATASET1_DIR = DATA_ROOT / "数据集1：历史真实文件数据"
 DATASET2_DIR = DATA_ROOT / "数据集2：后续流入的半结构化记录数据"

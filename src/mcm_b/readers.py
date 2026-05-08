@@ -8,6 +8,7 @@ returns status/warnings instead of failing the whole pipeline on one bad file.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import re
 import statistics
@@ -38,6 +39,37 @@ class DocumentRecord:
     status: str
     metadata: dict[str, object] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+
+    def to_json_dict(self) -> dict[str, object]:
+        """Return a JSON-serializable representation."""
+
+        return {
+            "doc_id": self.doc_id,
+            "path": self.path,
+            "dataset": self.dataset,
+            "extension": self.extension,
+            "size_bytes": self.size_bytes,
+            "text": self.text,
+            "status": self.status,
+            "metadata": self.metadata,
+            "warnings": self.warnings,
+        }
+
+    @classmethod
+    def from_json_dict(cls, data: dict[str, object]) -> "DocumentRecord":
+        """Build a record from cached JSON data."""
+
+        return cls(
+            doc_id=str(data.get("doc_id", "")),
+            path=str(data.get("path", "")),
+            dataset=str(data.get("dataset", "")),
+            extension=str(data.get("extension", "")),
+            size_bytes=int(data.get("size_bytes", 0)),
+            text=str(data.get("text", "")),
+            status=str(data.get("status", "")),
+            metadata=dict(data.get("metadata", {}) or {}),
+            warnings=list(data.get("warnings", []) or []),
+        )
 
 
 def read_document(path: Path, dataset: str, max_chars: int = 20_000) -> DocumentRecord:
@@ -86,6 +118,49 @@ def read_document(path: Path, dataset: str, max_chars: int = 20_000) -> Document
         metadata=metadata,
         warnings=warnings,
     )
+
+
+def make_metadata_only_record(
+    path: Path,
+    dataset: str,
+    status: str = "metadata_only",
+    warning: str | None = None,
+) -> DocumentRecord:
+    """Create a record for files intentionally not text-extracted."""
+
+    path = Path(path)
+    warnings = [warning] if warning else []
+    return DocumentRecord(
+        doc_id=path.stem,
+        path=str(path),
+        dataset=dataset,
+        extension=path.suffix.lower(),
+        size_bytes=path.stat().st_size if path.exists() else 0,
+        text="",
+        status=status,
+        metadata={},
+        warnings=warnings,
+    )
+
+
+def save_records_jsonl(records: list[DocumentRecord], path: Path) -> None:
+    """Persist extracted records as JSONL cache."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record.to_json_dict(), ensure_ascii=False) + "\n")
+
+
+def load_records_jsonl(path: Path) -> list[DocumentRecord]:
+    """Load records from a JSONL cache."""
+
+    records: list[DocumentRecord] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                records.append(DocumentRecord.from_json_dict(json.loads(line)))
+    return records
 
 
 def _read_txt(path: Path, max_chars: int) -> tuple[str, str]:

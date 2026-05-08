@@ -41,3 +41,11 @@ B 题是“智能办公场景下多源异构文件识别与治理优化”。需
 小样本输出只用于检查读取器和流程，不代表最终分类质量。
 
 全量实验需要另写脚本或显式扩大参数，不建议在没有缓存和日志设计前直接全量跑。
+
+当前已提供正式链路：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_b_pipeline.py --clusters 10 --max-chars 12000 --max-file-mb 25 --output-dir outputs\b_problem\run_filtered
+```
+
+该脚本会缓存抽取结果，并跳过超过 `--max-file-mb` 的全文解析，只保留元数据。
