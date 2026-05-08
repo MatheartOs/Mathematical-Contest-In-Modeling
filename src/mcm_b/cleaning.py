@@ -828,6 +828,7 @@ def _parse_note_value(notes: str, key: str) -> str:
 @lru_cache(maxsize=1)
 def _paddleocr_engine():
     det_dir, rec_dir = _resolve_paddleocr_model_dirs()
+    device = _resolve_paddleocr_device()
     from paddleocr import PaddleOCR
 
     return PaddleOCR(
@@ -836,8 +837,25 @@ def _paddleocr_engine():
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,
+        device=device,
         enable_mkldnn=False,
     )
+
+
+def _resolve_paddleocr_device() -> str:
+    env_device = os.environ.get("PADDLEOCR_DEVICE")
+    if env_device:
+        return env_device
+
+    try:
+        import paddle
+
+        if paddle.device.is_compiled_with_cuda():
+            paddle.set_device("gpu:0")
+            return "gpu:0"
+    except Exception:
+        pass
+    return "cpu"
 
 
 def _resolve_paddleocr_model_dirs() -> tuple[Path, Path]:
