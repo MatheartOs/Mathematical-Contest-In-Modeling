@@ -96,6 +96,24 @@ Dominant eigenvalue estimate: 14.07347775
 
 `science_complex_test.py` 是综合科学计算测试，会实际调用 NumPy、SciPy、Pandas、Matplotlib、Seaborn、Scikit-learn、Statsmodels、Sympy 和 NetworkX，覆盖线性代数、优化、积分、统计回归、机器学习、符号计算、图论和绘图输出。运行后会生成 `outputs/science_complex_test.png`。
 
+## B 题项目入口
+
+本次比赛已确定选择 B 题。代码目录已新增 `src/mcm_b/` 和 `scripts/`，用于多源异构文件识别、主题归类和人工复核优先级建模。
+
+默认命令只做轻量小样本，不会全量解析几千个文件：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\inspect_b_data.py
+.\.venv\Scripts\python.exe scripts\run_b_pipeline_sample.py
+```
+
+交接和协作说明见：
+
+- `docs/B_PROBLEM_NOTES.md`
+- `docs/ALGORITHM_SKETCH.md`
+- `docs/AGENT_HANDOFF.md`
+- `docs/GIT_WORKFLOW.md`
+
 ## 协作建议
 
 - 代码脚本放在 `src/` 或按题目模块分文件管理。
